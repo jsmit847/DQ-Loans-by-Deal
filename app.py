@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 
-APP_VERSION = "2026-05-15-v11-na-safe-current-prior-dashboard"
+APP_VERSION = "2026-05-15-v12-current-situs-termloan-carryforward"
 
 
 # ============================================================
@@ -22,7 +22,7 @@ st.set_page_config(
 st.title("DQ Table Generator")
 st.caption(f"Version {APP_VERSION}")
 st.caption(
-    "Upload this month's RSRV/DLSR files, this month's dashboard for Term Loan/Data enrichment, "
+    "Upload this month's RSRV/DLSR files, this month's dashboard for Term Loan/Situs enrichment, "
     "and last month's dashboard for DQ carry-forward metadata."
 )
 
@@ -751,19 +751,74 @@ def read_current_data_metadata(uploaded_file):
     return out
 
 
-def build_current_month_enrichment(current_dashboard_file):
-    term = read_current_term_loan_metadata(current_dashboard_file)
-    data = read_current_data_metadata(current_dashboard_file)
+def read_current_situs_metadata(uploaded_file):
+    """Read this month's Situs sheet.
 
-    if term.empty and data.empty:
+    Situs is the preferred source for property/reporting fields such as
+    property type, city, state, paid-through date, current balance, valuation,
+    and comments. Term Loan remains the source for Deal ID, Account,
+    Borrower Entity, and Deal Name.
+    """
+    if uploaded_file is None or not sheet_exists(uploaded_file, "Situs"):
         return pd.DataFrame()
 
-    if term.empty:
-        merged = data.copy()
-    elif data.empty:
-        merged = term.copy()
-    else:
-        merged = term.merge(data, on="loan_id", how="outer")
+    raw = read_sheet_raw(uploaded_file, "Situs")
+
+    header_row = find_header_row_by_required_terms(
+        raw,
+        [
+            "servicer loan number",
+            "deal name",
+            "securitization name",
+            "current principal balance",
+            "paid to date",
+        ],
+        min_hits=4,
+    )
+
+    if header_row is None:
+        return pd.DataFrame()
+
+    df = raw.iloc[header_row + 1:].copy()
+    df.columns = make_unique_columns(raw.iloc[header_row])
+    df = df.dropna(how="all").copy()
+
+    if "servicer_loan_number" not in df.columns:
+        return pd.DataFrame()
+
+    df["loan_id"] = df["servicer_loan_number"].apply(clean_id_value)
+    df = df[df["loan_id"].notna()].copy()
+    df = df[df["loan_id"].astype(str).str.contains(r"\d", na=False)].copy()
+
+    out = pd.DataFrame({
+        "loan_id": df["loan_id"],
+        "situs_securitization": col_or_na(df, "securitization_name").apply(normalize_securitization),
+        "situs_property_type": col_or_na(df, "property_type").apply(normalize_property_type),
+        "situs_city": col_or_na(df, "city"),
+        "situs_state": col_or_na(df, "state").apply(normalize_state),
+        "situs_paid_through_date": col_or_na(df, "paid_to_date").apply(parse_report_date),
+        "situs_current_upb": pd.to_numeric(col_or_na(df, "current_principal_balance"), errors="coerce"),
+        "situs_recent_appraisal": pd.to_numeric(col_or_na(df, "valuation_amount"), errors="coerce"),
+        "situs_appraisal_date": col_or_na(df, "valuation_date").apply(parse_report_date),
+        "situs_commentary": col_or_na(df, "comments"),
+    })
+
+    return out.drop_duplicates(subset=["loan_id"], keep="first")
+
+
+def build_current_month_enrichment(current_dashboard_file):
+    term = read_current_term_loan_metadata(current_dashboard_file)
+    situs = read_current_situs_metadata(current_dashboard_file)
+    data = read_current_data_metadata(current_dashboard_file)
+
+    frames = [df for df in [term, situs, data] if df is not None and not df.empty]
+
+    if not frames:
+        return pd.DataFrame()
+
+    merged = frames[0].copy()
+    for df in frames[1:]:
+        merged = merged.merge(df, on="loan_id", how="outer")
 
     return merged.drop_duplicates(subset=["loan_id"], keep="first")
 
@@ -941,13 +996,18 @@ def build_dq_table_from_dq_data(
     else:
         d["securitization_final"] = pd.NA
 
-    # Data sheet is a good fallback for securitization if filename/trans ID were unavailable.
+    # Current dashboard fallback for securitization if filename/trans ID were unavailable.
+    if "situs_securitization" in d.columns:
+        d["securitization_final"] = coalesce_existing(d["securitization_final"], d["situs_securitization"])
     if "data_securitization" in d.columns:
         d["securitization_final"] = coalesce_existing(d["securitization_final"], d["data_securitization"])
 
+    # Situs is the preferred source for these current-month report fields.
+    # DLSR remains the fallback because the DQ loan population/status comes from DLSR.
     current_upb = first_existing_series(
         d,
         [
+            "situs_current_upb",
             "current_ending_scheduled_balance",
             "current_upb",
             "data_current_upb",
@@ -956,14 +1016,14 @@ def build_dq_table_from_dq_data(
         ],
     )
 
-    # For DQ Table, DLSR Most Recent Value is preferred. Data/current month valuation is fallback.
     recent_appraisal = first_existing_series(
         d,
         [
+            "situs_recent_appraisal",
             "most_recent_value",
             "recent_appraisal",
-            "data_recent_appraisal",
             "group_recent_appraisal",
+            "data_recent_appraisal",
             "most_recent_appraisal",
         ],
     )
@@ -971,10 +1031,11 @@ def build_dq_table_from_dq_data(
     appraisal_date = first_existing_series(
         d,
         [
+            "situs_appraisal_date",
             "most_recent_valuation_date",
             "appraisal_date",
-            "data_appraisal_date",
             "group_appraisal_date",
+            "data_appraisal_date",
             "most_recent_appraisal_date",
         ],
     )
@@ -982,6 +1043,7 @@ def build_dq_table_from_dq_data(
     paid_through = first_existing_series(
         d,
         [
+            "situs_paid_through_date",
             "paid_through_date",
             "paid_through_date_carry",
             "data_paid_through_date",
@@ -991,6 +1053,7 @@ def build_dq_table_from_dq_data(
     commentary = first_existing_series(
         d,
         [
+            "situs_commentary",
             "comments_dlsr",
             "commentary",
             "comments",
@@ -1058,40 +1121,80 @@ def build_dq_table_from_dq_data(
         out["_Carry Recent Appraisal"] = pd.NA
         out["_Carry Appraisal Date"] = pd.NaT
 
-    # 2. Current month Term Loan/Data enrichment, especially for new loans absent from last month.
+    # 2. Current month enrichment.
+    # Term Loan owns: Deal ID, Account, Borrower Entity, Deal Name.
+    # Situs owns: property type, city, state, paid-through date, UPB, valuation, comments.
+    # Data remains only a low-priority fallback if Situs is missing/blank.
     if current_month_enrichment is not None and not current_month_enrichment.empty:
         e = current_month_enrichment.copy()
         e["loan_id"] = e["loan_id"].apply(clean_id_value)
         e = e.drop_duplicates(subset=["loan_id"], keep="first").set_index("loan_id")
 
-        current_map = {
+        term_map = {
             "term_deal_id": "Deal ID",
             "term_account": "Account",
             "term_borrower_entity": "Borrower Entity",
             "term_deal_name": "Deal Name",
-            "data_account": "Account",
-            "data_deal_name": "Deal Name",
-            "data_property_type": "Property Type",
-            "data_city": "City",
-            "data_state": "State",
         }
 
-        for source_col, target_col in current_map.items():
+        for source_col, target_col in term_map.items():
             if source_col not in e.columns:
                 continue
             mapped = out["Loan id"].map(e[source_col])
             if target_col == "Deal ID":
                 mapped = mapped.apply(clean_id_value)
+            # Term Loan is authoritative for these metadata fields when present.
+            out[target_col] = mapped.combine_first(out[target_col])
+
+        situs_map = {
+            "situs_property_type": "Property Type",
+            "situs_city": "City",
+            "situs_state": "State",
+            "situs_paid_through_date": "Paid Through Date",
+            "situs_current_upb": "Current UPB",
+            "situs_recent_appraisal": "Recent Appraisal",
+            "situs_appraisal_date": "Appraisal Date",
+            "situs_commentary": "Commentary",
+        }
+
+        for source_col, target_col in situs_map.items():
+            if source_col not in e.columns:
+                continue
+            mapped = out["Loan id"].map(e[source_col])
+            if target_col in ["Paid Through Date", "Appraisal Date"]:
+                mapped = mapped.apply(parse_report_date)
+            if target_col in ["Current UPB", "Recent Appraisal"]:
+                mapped = pd.to_numeric(mapped, errors="coerce")
+            if target_col == "Property Type":
+                mapped = mapped.apply(normalize_property_type)
+            if target_col == "State":
+                mapped = mapped.apply(normalize_state)
+            # Situs is authoritative for these current-month reporting fields when present.
+            out[target_col] = mapped.combine_first(out[target_col])
+
+        data_fallback_map = {
+            "data_property_type": "Property Type",
+            "data_city": "City",
+            "data_state": "State",
+            "data_paid_through_date": "Paid Through Date",
+            "data_current_upb": "Current UPB",
+            "data_recent_appraisal": "Recent Appraisal",
+            "data_appraisal_date": "Appraisal Date",
+        }
+
+        for source_col, target_col in data_fallback_map.items():
+            if source_col not in e.columns:
+                continue
+            mapped = out["Loan id"].map(e[source_col])
+            if target_col in ["Paid Through Date", "Appraisal Date"]:
+                mapped = mapped.apply(parse_report_date)
+            if target_col in ["Current UPB", "Recent Appraisal"]:
+                mapped = pd.to_numeric(mapped, errors="coerce")
+            if target_col == "Property Type":
+                mapped = mapped.apply(normalize_property_type)
+            if target_col == "State":
+                mapped = mapped.apply(normalize_state)
             out[target_col] = coalesce_existing(out[target_col], mapped)
-
-        # Use current Data valuation as fallback if DLSR/carry-forward is blank.
-        if "data_recent_appraisal" in e.columns:
-            mapped = pd.to_numeric(out["Loan id"].map(e["data_recent_appraisal"]), errors="coerce")
-            out["Recent Appraisal"] = coalesce_existing(out["Recent Appraisal"], mapped)
-
-        if "data_appraisal_date" in e.columns:
-            mapped = out["Loan id"].map(e["data_appraisal_date"]).apply(parse_report_date)
-            out["Appraisal Date"] = coalesce_existing(out["Appraisal Date"], mapped)
 
     out["Securitization"] = out["Securitization"].apply(dq_table_securitization_display)
     out["_Securitization Key"] = out["_Securitization Key"].apply(normalize_securitization)
@@ -1639,7 +1742,7 @@ dlsr_files = st.file_uploader(
 st.subheader("2. Upload this month's dashboard workbook")
 
 current_dashboard_file = st.file_uploader(
-    "Required: upload this month's dashboard workbook. The app uses this workbook's Term Loan and Data sheets to enrich new loans.",
+    "Required: upload this month's dashboard workbook. The app uses Term Loan for deal metadata and Situs for property/reporting fields.",
     type=["xls", "xlsx"],
     accept_multiple_files=False,
     key="current_dashboard",
@@ -1671,7 +1774,7 @@ if generate:
         st.stop()
 
     if current_dashboard_file is None:
-        st.error("Please upload this month's dashboard workbook so the app can read the Term Loan and Data sheets.")
+        st.error("Please upload this month's dashboard workbook so the app can read the Term Loan and Situs sheets.")
         st.stop()
 
     if last_dashboard_file is None:
@@ -1690,11 +1793,11 @@ if generate:
 
     st.success(f"Generated DQ Data: {len(dq_data_generated):,} loan rows")
 
-    with st.spinner("Reading current month Term Loan and Data enrichment..."):
+    with st.spinner("Reading current month Term Loan and Situs enrichment..."):
         current_enrichment = build_current_month_enrichment(current_dashboard_file)
 
     if current_enrichment.empty:
-        st.warning("No current-month enrichment rows were found from Term Loan/Data.")
+        st.warning("No current-month enrichment rows were found from Term Loan/Situs.")
     else:
         st.success(f"Loaded current-month enrichment rows: {len(current_enrichment):,}")
 

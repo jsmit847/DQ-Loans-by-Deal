@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 
-APP_VERSION = "2026-05-15-v10-current-term-loan-data-carryforward-formulas"
+APP_VERSION = "2026-05-15-v11-na-safe-current-prior-dashboard"
 
 
 # ============================================================
@@ -504,17 +504,20 @@ def extract_as_of_date(df_raw):
 def classify_section_value(value):
     normalized = normalize_dq_status(value)
 
-    valid_sections = [
+    if pd.isna(normalized):
+        return None
+
+    valid_sections = {
         "90+",
         "60-89",
         "30-59",
         "Current and at Special Servicer",
         "Matured Performing",
         "Matured Non-Performing",
-    ]
+    }
 
-    if normalized in valid_sections:
-        return normalized
+    if str(normalized) in valid_sections:
+        return str(normalized)
 
     return None
 

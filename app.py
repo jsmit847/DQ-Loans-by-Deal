@@ -1,11 +1,12 @@
 import re
 from io import BytesIO
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
 
-APP_VERSION = "2026-05-15-v5-na-safe"
+APP_VERSION = "2026-05-15-v10-current-term-loan-data-carryforward-formulas"
 
 
 # ============================================================
@@ -14,41 +15,21 @@ APP_VERSION = "2026-05-15-v5-na-safe"
 
 st.set_page_config(
     page_title="DQ Table Generator",
-    page_icon="DQ",
+    page_icon="📊",
     layout="wide",
 )
 
 st.title("DQ Table Generator")
+st.caption(f"Version {APP_VERSION}")
 st.caption(
-    f"Version {APP_VERSION} | Upload RSRV / DLSR Excel files to generate the DQ Table and DQ Loans by Deal sheets."
+    "Upload this month's RSRV/DLSR files, this month's dashboard for Term Loan/Data enrichment, "
+    "and last month's dashboard for DQ carry-forward metadata."
 )
 
 
 # ============================================================
 # General helpers
 # ============================================================
-
-def excel_engine_for_file(file_name):
-    name = str(file_name).lower()
-    if name.endswith(".xls"):
-        return "xlrd"
-    if name.endswith(".xlsx"):
-        return "openpyxl"
-    return None
-
-
-def make_excel_file(file_bytes, file_name):
-    engine = excel_engine_for_file(file_name)
-    if engine is None:
-        return pd.ExcelFile(BytesIO(file_bytes))
-    return pd.ExcelFile(BytesIO(file_bytes), engine=engine)
-
-
-def read_excel_sheet(file_bytes, file_name, sheet_name, header=None):
-    engine = excel_engine_for_file(file_name)
-    if engine is None:
-        return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=header)
-    return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=header, engine=engine)
 
 
 def clean_col_name(col):
@@ -88,6 +69,21 @@ def cell_to_text(x):
     if pd.isna(x):
         return ""
     return str(x).strip().lower()
+
+
+def is_blank_like(x):
+    if pd.isna(x):
+        return True
+
+    s = str(x).strip()
+
+    if s == "":
+        return True
+
+    if s.upper() in {"N/A", "NA", "NAN", "NONE", "NULL", "<NA>", "VARIOUS", "INCOMPLETE", "ZZ", "XX"}:
+        return True
+
+    return False
 
 
 def clean_id_value(x):
@@ -144,17 +140,16 @@ def normalize_dq_status(x):
 
         "60": "60-89",
         "60-89": "60-89",
-        "60 TO 89": "60-89",
         "60 TO 89 DAYS DELINQUENT": "60-89",
         "60 - 89 DAYS DELINQUENT": "60-89",
 
         "30": "30-59",
         "30-59": "30-59",
-        "30 TO 59": "30-59",
         "30 TO 59 DAYS DELINQUENT": "30-59",
         "30 - 59 DAYS DELINQUENT": "30-59",
 
         "CURRENT AND AT SPECIAL SERVICER": "Current and at Special Servicer",
+        "CURRENT & AT SPECIAL SERVICER": "Current and at Special Servicer",
 
         "MATURED PERFORMING LOANS": "Matured Performing",
         "MATURED PERFORMING": "Matured Performing",
@@ -176,6 +171,7 @@ def normalize_securitization(x):
 
     u = u.replace("COREVEST AMER", "CAF")
     u = u.replace("COREVEST", "CAF")
+    u = u.replace("CVAF", "CAF")
 
     u = re.sub(r"\bCAF(\d{4})", r"CAF \1", u)
     u = re.sub(r"\bCAFL(\d{4})", r"CAFL \1", u)
@@ -186,9 +182,78 @@ def normalize_securitization(x):
         "CAF 18-1": "CAF 2018-1",
         "CAF19-2": "CAF 2019-2",
         "CAF 19-2": "CAF 2019-2",
+        "CAF 2020 P1": "CAFL 2020-P1",
+        "CAF 2022 P2": "CAF 2022-P2",
+        "CAF 2023 P1": "CAF 2023-P1",
     }
 
     return mapping.get(u, u)
+
+
+
+
+def normalize_state(x):
+    if pd.isna(x):
+        return pd.NA
+
+    s = str(x).strip()
+    if s == "":
+        return pd.NA
+
+    state_map = {
+        "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR",
+        "CALIFORNIA": "CA", "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE",
+        "DISTRICT OF COLUMBIA": "DC", "WASHINGTON DC": "DC", "WASHINGTON D.C.": "DC",
+        "FLORIDA": "FL", "GEORGIA": "GA", "HAWAII": "HI", "IDAHO": "ID",
+        "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA", "KANSAS": "KS",
+        "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD",
+        "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS",
+        "MISSOURI": "MO", "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV",
+        "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ", "NEW MEXICO": "NM", "NEW YORK": "NY",
+        "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH", "OKLAHOMA": "OK",
+        "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
+        "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT",
+        "VERMONT": "VT", "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV",
+        "WISCONSIN": "WI", "WYOMING": "WY",
+    }
+
+    u = re.sub(r"\s+", " ", s.upper())
+    if len(u) == 2:
+        return u
+    return state_map.get(u, s)
+
+
+def normalize_property_type(x):
+    if pd.isna(x):
+        return pd.NA
+
+    s = str(x).strip()
+    u = re.sub(r"\s+", " ", s.upper())
+
+    if u in {"SF", "SFR", "SFRS", "SINGLE FAMILY", "SINGLE-FAMILY", "SINGLE FAMILY RENTAL", "SINGLE FAMILY RENTALS"}:
+        return "SF"
+    if "SFR" in u or "SINGLE" in u:
+        return "SF"
+    if u in {"MF", "MULTIFAMILY", "MULTI FAMILY", "MULTI-FAMILY"}:
+        return "MF"
+    if "MULTI" in u:
+        return "MF"
+
+    return s
+
+def dq_table_securitization_display(sec):
+    sec = normalize_securitization(sec)
+
+    # Match the existing dashboard quirk exactly.
+    special = {
+        "CAF 2018-2": "CAF2018-2",
+    }
+
+    return special.get(sec, sec)
+
+
+def report_securitization_display(sec):
+    return normalize_securitization(sec)
 
 
 def col_or_na(df, col):
@@ -216,6 +281,17 @@ def safe_excel_value(value):
     return value
 
 
+def coalesce_existing(left, right):
+    """Keep left unless it is blank-like, otherwise use right."""
+    if isinstance(left, pd.Series):
+        out = left.copy()
+        mask = out.apply(is_blank_like)
+        out.loc[mask] = right.loc[mask]
+        return out
+
+    return right if is_blank_like(left) else left
+
+
 # ============================================================
 # Deal / DQ ordering
 # ============================================================
@@ -240,10 +316,19 @@ DEAL_ORDER = [
     "CAF 2023-P1",
 ]
 
-DQ_ORDER = [
+DQ_TABLE_ORDER = [
     "90+",
     "60-89",
     "30-59",
+    "Current and at Special Servicer",
+    "Matured Performing",
+    "Matured Non-Performing",
+]
+
+DQ_REPORT_ORDER = [
+    "30-59",
+    "60-89",
+    "90+",
     "Current and at Special Servicer",
     "Matured Performing",
     "Matured Non-Performing",
@@ -260,31 +345,36 @@ DQ_DISPLAY = {
 
 
 def deal_sort_key(x):
-    x = str(x)
+    x = normalize_securitization(x)
+
     if x in DEAL_ORDER:
         return (0, DEAL_ORDER.index(x))
-    return (1, x)
+
+    return (1, str(x))
 
 
 def deal_order_value(x):
-    x = str(x)
+    x = normalize_securitization(x)
+
     if x in DEAL_ORDER:
         return DEAL_ORDER.index(x)
+
     return 999
 
 
-def dq_order_value(x):
+def dq_order_value(x, order):
     x = normalize_dq_status(x)
-    if pd.isna(x):
-        return 999
-    if x in DQ_ORDER:
-        return DQ_ORDER.index(x)
+
+    if x in order:
+        return order.index(x)
+
     return 999
 
 
 # ============================================================
 # Securitization helper
 # ============================================================
+
 
 def securitization_from_file(source_file):
     name = str(source_file).strip()
@@ -321,11 +411,50 @@ def securitization_from_file(source_file):
 
 
 # ============================================================
-# DLSR sheet detection
+# Generic workbook readers
 # ============================================================
 
-def find_dlsr_sheet(file_bytes, file_name):
-    xl = make_excel_file(file_bytes, file_name)
+
+def get_sheet_names(uploaded_file):
+    file_bytes = uploaded_file.getvalue()
+    xl = pd.ExcelFile(BytesIO(file_bytes))
+    return xl.sheet_names
+
+
+def read_sheet_raw(uploaded_file, sheet_name):
+    file_bytes = uploaded_file.getvalue()
+    return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
+
+
+def find_header_row_by_required_terms(df_raw, required_terms, min_hits=None):
+    required_terms = [term.lower() for term in required_terms]
+    min_hits = min_hits or len(required_terms)
+
+    for idx in df_raw.index:
+        row = [cell_to_text(x) for x in df_raw.loc[idx].tolist()]
+        row_text = " | ".join(row)
+        hits = sum(1 for term in required_terms if term in row_text)
+
+        if hits >= min_hits:
+            return idx
+
+    return None
+
+
+def sheet_exists(uploaded_file, sheet_name):
+    try:
+        return sheet_name in get_sheet_names(uploaded_file)
+    except Exception:
+        return False
+
+
+# ============================================================
+# DLSR parser
+# ============================================================
+
+
+def find_dlsr_sheet(file_bytes):
+    xl = pd.ExcelFile(BytesIO(file_bytes))
     sheet_names = xl.sheet_names
 
     preferred = [
@@ -346,7 +475,7 @@ def find_dlsr_sheet(file_bytes, file_name):
     return None
 
 
-def find_header_row(df_raw):
+def find_dlsr_header_row(df_raw):
     for idx in df_raw.index:
         row = [cell_to_text(x) for x in df_raw.loc[idx].tolist()]
 
@@ -364,17 +493,16 @@ def extract_as_of_date(df_raw):
     for r in df_raw.index:
         for c in df_raw.columns:
             val = cell_to_text(df_raw.loc[r, c])
+
             if val == "as of":
                 if r + 1 in df_raw.index:
                     return parse_report_date(df_raw.loc[r + 1, c])
+
     return pd.NaT
 
 
 def classify_section_value(value):
     normalized = normalize_dq_status(value)
-
-    if pd.isna(normalized):
-        return None
 
     valid_sections = [
         "90+",
@@ -385,21 +513,17 @@ def classify_section_value(value):
         "Matured Non-Performing",
     ]
 
-    if str(normalized) in valid_sections:
+    if normalized in valid_sections:
         return normalized
 
     return None
 
 
-# ============================================================
-# DLSR parser
-# ============================================================
-
 def process_dlsr_uploaded_file(uploaded_file):
     source_file = uploaded_file.name
     file_bytes = uploaded_file.getvalue()
 
-    sheet_name = find_dlsr_sheet(file_bytes, source_file)
+    sheet_name = find_dlsr_sheet(file_bytes)
 
     if sheet_name is None:
         return None, {
@@ -408,15 +532,14 @@ def process_dlsr_uploaded_file(uploaded_file):
             "reason": "No DLSR-like sheet found",
         }
 
-    df_raw = read_excel_sheet(
-        file_bytes=file_bytes,
-        file_name=source_file,
+    df_raw = pd.read_excel(
+        BytesIO(file_bytes),
         sheet_name=sheet_name,
         header=None,
     )
 
     report_as_of = extract_as_of_date(df_raw)
-    header_row = find_header_row(df_raw)
+    header_row = find_dlsr_header_row(df_raw)
 
     if header_row is None:
         return None, {
@@ -444,7 +567,7 @@ def process_dlsr_uploaded_file(uploaded_file):
 
     loan_id_col = loan_id_cols[0]
 
-    # DQ is encoded as section rows in the first column, then forward-filled to loan rows.
+    # DQ status is encoded as section rows, then forward-filled.
     df["dq"] = pd.NA
 
     first_col = df.columns[0]
@@ -470,11 +593,11 @@ def process_dlsr_uploaded_file(uploaded_file):
     sec_from_file = securitization_from_file(source_file)
 
     if pd.isna(sec_from_file):
-        df["securitization"] = col_or_na(df, "trans_id").apply(normalize_securitization)
+        df["securitization_key"] = col_or_na(df, "trans_id").apply(normalize_securitization)
     else:
-        df["securitization"] = sec_from_file
+        df["securitization_key"] = sec_from_file
 
-    df["securitization"] = df["securitization"].apply(normalize_securitization)
+    df["securitization_key"] = df["securitization_key"].apply(normalize_securitization)
 
     if "loan_id" not in df.columns:
         return None, {
@@ -528,7 +651,7 @@ def parse_uploaded_dlsr_files(uploaded_files):
     dq_data_generated = pd.concat(parsed, ignore_index=True)
 
     dq_data_generated = dq_data_generated.drop_duplicates(
-        subset=["securitization", "loan_id"],
+        subset=["securitization_key", "loan_id"],
         keep="first",
     ).copy()
 
@@ -536,8 +659,116 @@ def parse_uploaded_dlsr_files(uploaded_files):
 
 
 # ============================================================
-# Prior DQ Table metadata reader
+# Current month dashboard enrichment readers
 # ============================================================
+
+
+def read_current_term_loan_metadata(uploaded_file):
+    if uploaded_file is None or not sheet_exists(uploaded_file, "Term Loan"):
+        return pd.DataFrame()
+
+    raw = read_sheet_raw(uploaded_file, "Term Loan")
+
+    header_row = find_header_row_by_required_terms(
+        raw,
+        ["deal number", "servicer id", "deal name", "borrower entity", "account name"],
+        min_hits=4,
+    )
+
+    if header_row is None:
+        return pd.DataFrame()
+
+    df = raw.iloc[header_row + 1:].copy()
+    df.columns = make_unique_columns(raw.iloc[header_row])
+    df = df.dropna(how="all").copy()
+
+    # Term Loan: Servicer ID is the best match to DLSR Loan ID; Deal Number is dashboard Deal ID.
+    if "servicer_id" not in df.columns:
+        return pd.DataFrame()
+
+    df["loan_id"] = df["servicer_id"].apply(clean_id_value)
+    df = df[df["loan_id"].notna()].copy()
+    df = df[df["loan_id"].astype(str).str.contains(r"\d", na=False)].copy()
+
+    out = pd.DataFrame({
+        "loan_id": df["loan_id"],
+        "term_deal_id": col_or_na(df, "deal_number").apply(clean_id_value),
+        "term_account": col_or_na(df, "account_name"),
+        "term_borrower_entity": col_or_na(df, "borrower_entity"),
+        "term_deal_name": col_or_na(df, "deal_name"),
+        "term_portfolio": col_or_na(df, "portfolio"),
+        "term_segment": col_or_na(df, "segment"),
+    })
+
+    out = out.drop_duplicates(subset=["loan_id"], keep="first")
+    return out
+
+
+def read_current_data_metadata(uploaded_file):
+    if uploaded_file is None or not sheet_exists(uploaded_file, "Data"):
+        return pd.DataFrame()
+
+    raw = read_sheet_raw(uploaded_file, "Data")
+
+    header_row = find_header_row_by_required_terms(
+        raw,
+        ["asset id", "asset name", "current upb", "city", "property type"],
+        min_hits=4,
+    )
+
+    if header_row is None:
+        return pd.DataFrame()
+
+    df = raw.iloc[header_row + 1:].copy()
+    df.columns = make_unique_columns(raw.iloc[header_row])
+    df = df.dropna(how="all").copy()
+
+    if "asset_id" not in df.columns:
+        return pd.DataFrame()
+
+    df["loan_id"] = df["asset_id"].apply(clean_id_value)
+    df = df[df["loan_id"].notna()].copy()
+    df = df[df["loan_id"].astype(str).str.contains(r"\d", na=False)].copy()
+
+    out = pd.DataFrame({
+        "loan_id": df["loan_id"],
+        "data_securitization": col_or_na(df, "deal_id").apply(normalize_securitization),
+        "data_account": col_or_na(df, "status"),
+        "data_deal_name": col_or_na(df, "asset_name"),
+        "data_property_type": col_or_na(df, "property_type").apply(normalize_property_type),
+        "data_city": col_or_na(df, "city"),
+        "data_state": first_existing_series(df, ["st", "state"]).apply(normalize_state),
+        "data_paid_through_date": col_or_na(df, "next_payment_due_date").apply(parse_report_date),
+        "data_current_upb": pd.to_numeric(col_or_na(df, "current_upb"), errors="coerce"),
+        "data_appraisal_date": first_existing_series(df, ["valuationdate", "valuation_date"]).apply(parse_report_date),
+        "data_recent_appraisal": pd.to_numeric(first_existing_series(df, ["valuation_amount", "valuation_amount_1"]), errors="coerce"),
+    })
+
+    out = out.drop_duplicates(subset=["loan_id"], keep="first")
+    return out
+
+
+def build_current_month_enrichment(current_dashboard_file):
+    term = read_current_term_loan_metadata(current_dashboard_file)
+    data = read_current_data_metadata(current_dashboard_file)
+
+    if term.empty and data.empty:
+        return pd.DataFrame()
+
+    if term.empty:
+        merged = data.copy()
+    elif data.empty:
+        merged = term.copy()
+    else:
+        merged = term.merge(data, on="loan_id", how="outer")
+
+    return merged.drop_duplicates(subset=["loan_id"], keep="first")
+
+
+# ============================================================
+# Last month dashboard carry-forward readers
+# ============================================================
+
 
 def find_dq_table_header_row(df_raw):
     for idx in df_raw.index:
@@ -551,89 +782,185 @@ def find_dq_table_header_row(df_raw):
         if has_securitization and has_loan and has_dq:
             return idx
 
-    return 1
+    return None
 
 
-def read_dq_table_metadata(uploaded_file, sheet_name="DQ Table"):
-    file_name = uploaded_file.name
-    file_bytes = uploaded_file.getvalue()
-
-    xl = make_excel_file(file_bytes, file_name)
-
-    if sheet_name not in xl.sheet_names:
+def read_dq_table_from_dashboard(uploaded_file, preferred_sheets=None):
+    if uploaded_file is None:
         return pd.DataFrame()
 
-    dq_table_raw = read_excel_sheet(
-        file_bytes=file_bytes,
-        file_name=file_name,
-        sheet_name=sheet_name,
-        header=None,
+    preferred_sheets = preferred_sheets or ["DQ Table", "old DQ Table"]
+
+    sheet_names = get_sheet_names(uploaded_file)
+
+    selected_sheet = None
+    for sheet in preferred_sheets:
+        if sheet in sheet_names:
+            selected_sheet = sheet
+            break
+
+    if selected_sheet is None:
+        return pd.DataFrame()
+
+    raw = read_sheet_raw(uploaded_file, selected_sheet)
+    header_row = find_dq_table_header_row(raw)
+
+    if header_row is None:
+        return pd.DataFrame()
+
+    df = raw.iloc[header_row + 1:].copy()
+    df.columns = make_unique_columns(raw.iloc[header_row])
+    df = df.dropna(how="all").copy()
+
+    if "loan_id" not in df.columns:
+        return pd.DataFrame()
+
+    df = df[df["loan_id"].notna()].copy()
+    df = df[df["loan_id"].astype(str).str.contains(r"\d", na=False)].copy()
+    df["loan_id"] = df["loan_id"].apply(clean_id_value)
+
+    if "securitization" in df.columns:
+        df["securitization"] = df["securitization"].apply(normalize_securitization)
+
+    if "dq" in df.columns:
+        df["dq"] = df["dq"].apply(normalize_dq_status)
+
+    df["carry_source_sheet"] = selected_sheet
+    return df.drop_duplicates(subset=["loan_id"], keep="first")
+
+
+def read_dq_loans_by_deal_from_dashboard(uploaded_file, preferred_sheets=None):
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    preferred_sheets = preferred_sheets or ["DQ Loans by Deal", "OLD DQ Loans by Deal"]
+    sheet_names = get_sheet_names(uploaded_file)
+
+    selected_sheet = None
+    for sheet in preferred_sheets:
+        if sheet in sheet_names:
+            selected_sheet = sheet
+            break
+
+    if selected_sheet is None:
+        return pd.DataFrame()
+
+    raw = read_sheet_raw(uploaded_file, selected_sheet)
+
+    header_row = find_header_row_by_required_terms(
+        raw,
+        ["loan id", "deal id", "current upb", "recent appraisal", "appraisal date"],
+        min_hits=4,
     )
 
-    header_row = find_dq_table_header_row(dq_table_raw)
-
-    dq_table = dq_table_raw.iloc[header_row + 1:].copy()
-    dq_table.columns = make_unique_columns(dq_table_raw.iloc[header_row])
-
-    dq_table = dq_table.dropna(how="all").copy()
-
-    if "loan_id" not in dq_table.columns:
+    if header_row is None:
         return pd.DataFrame()
 
-    dq_table = dq_table[dq_table["loan_id"].notna()].copy()
-    dq_table = dq_table[
-        dq_table["loan_id"].astype(str).str.contains(r"\d", na=False)
-    ].copy()
+    df = raw.iloc[header_row + 1:].copy()
+    df.columns = make_unique_columns(raw.iloc[header_row])
+    df = df.dropna(how="all").copy()
 
-    dq_table["loan_id"] = dq_table["loan_id"].apply(clean_id_value)
+    if "loan_id" not in df.columns:
+        return pd.DataFrame()
 
-    if "securitization" in dq_table.columns:
-        dq_table["securitization"] = dq_table["securitization"].apply(normalize_securitization)
+    df = df[df["loan_id"].notna()].copy()
+    df = df[df["loan_id"].astype(str).str.contains(r"\d", na=False)].copy()
+    df["loan_id"] = df["loan_id"].apply(clean_id_value)
 
-    if "dq" in dq_table.columns:
-        dq_table["dq"] = dq_table["dq"].apply(normalize_dq_status)
+    out = pd.DataFrame({
+        "loan_id": df["loan_id"],
+        "group_recent_appraisal": pd.to_numeric(col_or_na(df, "recent_appraisal"), errors="coerce"),
+        "group_appraisal_date": col_or_na(df, "appraisal_date").apply(parse_report_date),
+    })
 
-    return dq_table
+    return out.drop_duplicates(subset=["loan_id"], keep="first")
+
+
+def build_last_month_carryforward(last_dashboard_file):
+    dq_table = read_dq_table_from_dashboard(last_dashboard_file, ["DQ Table", "old DQ Table"])
+    grouped = read_dq_loans_by_deal_from_dashboard(last_dashboard_file, ["DQ Loans by Deal", "OLD DQ Loans by Deal"])
+
+    if dq_table.empty and grouped.empty:
+        return pd.DataFrame()
+
+    if dq_table.empty:
+        merged = grouped.copy()
+    elif grouped.empty:
+        merged = dq_table.copy()
+    else:
+        merged = dq_table.merge(grouped, on="loan_id", how="outer")
+
+    return merged.drop_duplicates(subset=["loan_id"], keep="first")
 
 
 # ============================================================
 # DQ Table builder
 # ============================================================
 
-def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
+
+def build_dq_table_from_dq_data(
+    dq_data,
+    current_month_enrichment=None,
+    last_month_carryforward=None,
+    use_manual_dq_overrides=False,
+):
     d = dq_data.copy()
 
-    dq_source = first_existing_series(
-        d,
-        ["dq", "dq_from_section", "delinquency_status"],
-    )
+    d["loan_id"] = d["loan_id"].apply(clean_id_value)
 
+    if current_month_enrichment is not None and not current_month_enrichment.empty:
+        d = d.merge(current_month_enrichment, on="loan_id", how="left")
+
+    if last_month_carryforward is not None and not last_month_carryforward.empty:
+        d = d.merge(
+            last_month_carryforward,
+            on="loan_id",
+            how="left",
+            suffixes=("", "_carry"),
+        )
+
+    dq_source = first_existing_series(d, ["dq", "dq_from_section", "delinquency_status"])
     d["dq_final"] = dq_source.apply(normalize_dq_status)
 
-    if "securitization" in d.columns:
+    if use_manual_dq_overrides and "dq_carry" in d.columns:
+        carry_dq = d["dq_carry"].apply(normalize_dq_status)
+        d["dq_final"] = carry_dq.combine_first(d["dq_final"])
+    elif use_manual_dq_overrides and "dq" in d.columns and "dq_carry" not in d.columns:
+        # No-op branch retained for clarity.
+        d["dq_final"] = d["dq_final"]
+
+    if "securitization_key" in d.columns:
+        d["securitization_final"] = d["securitization_key"].apply(normalize_securitization)
+    elif "securitization" in d.columns:
         d["securitization_final"] = d["securitization"].apply(normalize_securitization)
     elif "trans_id" in d.columns:
         d["securitization_final"] = d["trans_id"].apply(normalize_securitization)
     else:
         d["securitization_final"] = pd.NA
 
-    d["loan_id"] = d["loan_id"].apply(clean_id_value)
+    # Data sheet is a good fallback for securitization if filename/trans ID were unavailable.
+    if "data_securitization" in d.columns:
+        d["securitization_final"] = coalesce_existing(d["securitization_final"], d["data_securitization"])
 
     current_upb = first_existing_series(
         d,
         [
             "current_ending_scheduled_balance",
             "current_upb",
+            "data_current_upb",
             "scheduled_balance",
             "ending_scheduled_balance",
         ],
     )
 
+    # For DQ Table, DLSR Most Recent Value is preferred. Data/current month valuation is fallback.
     recent_appraisal = first_existing_series(
         d,
         [
             "most_recent_value",
             "recent_appraisal",
+            "data_recent_appraisal",
+            "group_recent_appraisal",
             "most_recent_appraisal",
         ],
     )
@@ -643,7 +970,18 @@ def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
         [
             "most_recent_valuation_date",
             "appraisal_date",
+            "data_appraisal_date",
+            "group_appraisal_date",
             "most_recent_appraisal_date",
+        ],
+    )
+
+    paid_through = first_existing_series(
+        d,
+        [
+            "paid_through_date",
+            "paid_through_date_carry",
+            "data_paid_through_date",
         ],
     )
 
@@ -657,7 +995,8 @@ def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
     )
 
     out = pd.DataFrame({
-        "Securitization": d["securitization_final"],
+        "Securitization": d["securitization_final"].apply(dq_table_securitization_display),
+        "_Securitization Key": d["securitization_final"].apply(normalize_securitization),
         "DQ": d["dq_final"],
         "Loan id": d["loan_id"],
         "Deal ID": col_or_na(d, "prospectus_loan_id").apply(clean_id_value),
@@ -667,65 +1006,127 @@ def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
         "Property Type": col_or_na(d, "property_type"),
         "City": col_or_na(d, "property_city"),
         "State": col_or_na(d, "property_state"),
-        "Paid Through Date": col_or_na(d, "paid_through_date").apply(parse_report_date),
+        "Paid Through Date": paid_through.apply(parse_report_date),
         "Current UPB": pd.to_numeric(current_upb, errors="coerce"),
         "Recent Appraisal": pd.to_numeric(recent_appraisal, errors="coerce"),
         "Appraisal Date": appraisal_date.apply(parse_report_date),
         "Commentary": commentary,
     })
 
-    # Optional enrichment using prior/manual DQ Table.
-    # DLSR does not reliably contain cleaned account/borrower/deal/city/state metadata.
-    if metadata_cache is not None and not metadata_cache.empty:
-        e = metadata_cache.copy()
+    # 1. Carry-forward old/manual DQ Table metadata for existing loans.
+    # Do not overwrite current fields like DQ, Paid Through, Current UPB, Commentary.
+    if last_month_carryforward is not None and not last_month_carryforward.empty:
+        e = last_month_carryforward.copy()
         e["loan_id"] = e["loan_id"].apply(clean_id_value)
-        e = e.drop_duplicates(subset=["loan_id"], keep="first")
-        e = e.set_index("loan_id")
+        e = e.drop_duplicates(subset=["loan_id"], keep="first").set_index("loan_id")
 
-        enrich_map = {
-            "securitization": "Securitization",
-            "deal_id": "Deal ID",
-            "account": "Account",
-            "borrower_entity": "Borrower Entity",
-            "deal_name": "Deal Name",
-            "property_type": "Property Type",
-            "city": "City",
-            "state": "State",
+        carry_map = {
+            "securitization": ("Securitization", dq_table_securitization_display),
+            "deal_id": ("Deal ID", clean_id_value),
+            "account": ("Account", None),
+            "borrower_entity": ("Borrower Entity", None),
+            "deal_name": ("Deal Name", None),
+            "property_type": ("Property Type", None),
+            "city": ("City", None),
+            "state": ("State", None),
         }
 
-        for source_col, target_col in enrich_map.items():
+        for source_col, (target_col, transform) in carry_map.items():
             if source_col not in e.columns:
                 continue
-
             mapped = out["Loan id"].map(e[source_col])
+            if transform is not None:
+                mapped = mapped.apply(transform)
+            out[target_col] = mapped.combine_first(out[target_col])
 
-            if target_col == "Securitization":
-                out[target_col] = out[target_col].combine_first(mapped)
-            else:
-                out[target_col] = mapped.combine_first(out[target_col])
+        # DQ Loans by Deal often carries appraisal fields more completely than DLSR.
+        if "group_recent_appraisal" in e.columns:
+            mapped = pd.to_numeric(out["Loan id"].map(e["group_recent_appraisal"]), errors="coerce")
+            out["_Carry Recent Appraisal"] = mapped
+        else:
+            out["_Carry Recent Appraisal"] = pd.NA
 
-    out["Securitization"] = out["Securitization"].apply(normalize_securitization)
+        if "group_appraisal_date" in e.columns:
+            mapped = out["Loan id"].map(e["group_appraisal_date"]).apply(parse_report_date)
+            out["_Carry Appraisal Date"] = mapped
+        else:
+            out["_Carry Appraisal Date"] = pd.NaT
+    else:
+        out["_Carry Recent Appraisal"] = pd.NA
+        out["_Carry Appraisal Date"] = pd.NaT
+
+    # 2. Current month Term Loan/Data enrichment, especially for new loans absent from last month.
+    if current_month_enrichment is not None and not current_month_enrichment.empty:
+        e = current_month_enrichment.copy()
+        e["loan_id"] = e["loan_id"].apply(clean_id_value)
+        e = e.drop_duplicates(subset=["loan_id"], keep="first").set_index("loan_id")
+
+        current_map = {
+            "term_deal_id": "Deal ID",
+            "term_account": "Account",
+            "term_borrower_entity": "Borrower Entity",
+            "term_deal_name": "Deal Name",
+            "data_account": "Account",
+            "data_deal_name": "Deal Name",
+            "data_property_type": "Property Type",
+            "data_city": "City",
+            "data_state": "State",
+        }
+
+        for source_col, target_col in current_map.items():
+            if source_col not in e.columns:
+                continue
+            mapped = out["Loan id"].map(e[source_col])
+            if target_col == "Deal ID":
+                mapped = mapped.apply(clean_id_value)
+            out[target_col] = coalesce_existing(out[target_col], mapped)
+
+        # Use current Data valuation as fallback if DLSR/carry-forward is blank.
+        if "data_recent_appraisal" in e.columns:
+            mapped = pd.to_numeric(out["Loan id"].map(e["data_recent_appraisal"]), errors="coerce")
+            out["Recent Appraisal"] = coalesce_existing(out["Recent Appraisal"], mapped)
+
+        if "data_appraisal_date" in e.columns:
+            mapped = out["Loan id"].map(e["data_appraisal_date"]).apply(parse_report_date)
+            out["Appraisal Date"] = coalesce_existing(out["Appraisal Date"], mapped)
+
+    out["Securitization"] = out["Securitization"].apply(dq_table_securitization_display)
+    out["_Securitization Key"] = out["_Securitization Key"].apply(normalize_securitization)
     out["Loan id"] = out["Loan id"].apply(clean_id_value)
     out["Deal ID"] = out["Deal ID"].apply(clean_id_value)
     out["DQ"] = out["DQ"].apply(normalize_dq_status)
+    out["Property Type"] = out["Property Type"].apply(normalize_property_type)
+    out["State"] = out["State"].apply(normalize_state)
+
+    # For the grouped report, prefer carry-forward appraisal values where present,
+    # then the generated/current DQ Table values.
+    out["_Report Recent Appraisal"] = coalesce_existing(
+        out["_Carry Recent Appraisal"],
+        out["Recent Appraisal"],
+    )
+    out["_Report Appraisal Date"] = coalesce_existing(
+        out["_Carry Appraisal Date"],
+        out["Appraisal Date"],
+    )
 
     out = out.drop_duplicates(
-        subset=["Securitization", "Loan id"],
+        subset=["_Securitization Key", "Loan id"],
         keep="first",
     ).copy()
 
-    out["_deal_order"] = out["Securitization"].map(deal_order_value)
-    out["_dq_order"] = out["DQ"].map(dq_order_value)
+    out["_deal_order"] = out["_Securitization Key"].map(deal_order_value)
+    out["_dq_order"] = out["DQ"].map(lambda x: dq_order_value(x, DQ_TABLE_ORDER))
     out["_loan_sort"] = out["Loan id"].astype(str)
 
-    out = (
-        out.sort_values(
-            by=["_deal_order", "_dq_order", "_loan_sort"],
-            ascending=True,
-        )
-        .drop(columns=["_deal_order", "_dq_order", "_loan_sort"])
-    )
+    out = out.sort_values(
+        by=["_deal_order", "_dq_order", "_loan_sort"],
+        ascending=True,
+    ).drop(columns=["_deal_order", "_dq_order", "_loan_sort"])
 
+    return out
+
+
+def dq_table_display_frame(dq_table_internal):
     final_cols = [
         "Securitization",
         "DQ",
@@ -743,18 +1144,18 @@ def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
         "Appraisal Date",
         "Commentary",
     ]
-
-    return out[final_cols]
+    return dq_table_internal[final_cols].copy()
 
 
 # ============================================================
 # DQ Loans by Deal builder
 # ============================================================
 
-def build_dq_loans_by_deal(dq_table):
-    d = dq_table.copy()
 
-    d["Securitization"] = d["Securitization"].apply(normalize_securitization)
+def build_dq_loans_by_deal(dq_table_internal):
+    d = dq_table_internal.copy()
+
+    d["_Securitization Key"] = d["_Securitization Key"].apply(normalize_securitization)
     d["DQ"] = d["DQ"].apply(normalize_dq_status)
     d["Current UPB"] = pd.to_numeric(d["Current UPB"], errors="coerce")
 
@@ -769,27 +1170,31 @@ def build_dq_loans_by_deal(dq_table):
         "State",
         "Paid Through Date",
         "Current UPB",
-        "Recent Appraisal",
-        "Appraisal Date",
+        "_Report Recent Appraisal",
+        "_Report Appraisal Date",
         "Commentary",
     ]
 
     rows = []
 
-    deals = sorted(
-        d["Securitization"].dropna().unique(),
-        key=deal_sort_key,
-    )
-
-    for securitization in deals:
-        deal_df = d[d["Securitization"].eq(securitization)].copy()
+    for securitization in DEAL_ORDER:
+        deal_df = d[d["_Securitization Key"].eq(securitization)].copy()
 
         rows.append({
             "row_type": "deal",
-            "Item": securitization,
+            "Item": report_securitization_display(securitization),
         })
 
-        for dq_status in DQ_ORDER:
+        if deal_df.empty:
+            rows.append({
+                "row_type": "total",
+                "Item": "TOTAL UPB",
+                "Loan ID": None,
+                "_sum_current_upb": 0,
+            })
+            continue
+
+        for dq_status in DQ_REPORT_ORDER:
             status_df = deal_df[deal_df["DQ"].eq(dq_status)].copy()
 
             if status_df.empty:
@@ -810,7 +1215,15 @@ def build_dq_loans_by_deal(dq_table):
                 }
 
                 for col in detail_cols:
-                    output_col = "Loan ID" if col == "Loan id" else col
+                    if col == "Loan id":
+                        output_col = "Loan ID"
+                    elif col == "_Report Recent Appraisal":
+                        output_col = "Recent Appraisal"
+                    elif col == "_Report Appraisal Date":
+                        output_col = "Appraisal Date"
+                    else:
+                        output_col = col
+
                     row[output_col] = loan[col]
 
                 rows.append(row)
@@ -818,7 +1231,8 @@ def build_dq_loans_by_deal(dq_table):
             rows.append({
                 "row_type": "total",
                 "Item": "TOTAL UPB",
-                "Current UPB": status_df["Current UPB"].sum(),
+                "Loan ID": None,
+                "_sum_current_upb": status_df["Current UPB"].sum(),
             })
 
     output_cols = [
@@ -827,38 +1241,59 @@ def build_dq_loans_by_deal(dq_table):
         "Loan ID",
         "Deal ID",
         "Account",
-        "Borrower Entity",
+        "Borrower Entitity",
         "Deal Name",
         "Property Type",
         "City",
         "State",
-        "Paid Through Date",
+        "Paid through Date",
         "Current UPB",
         "Recent Appraisal",
         "Appraisal Date",
         "Commentary",
+        "_sum_current_upb",
     ]
 
-    return pd.DataFrame(rows, columns=output_cols)
+    grouped = pd.DataFrame(rows)
+
+    rename_map = {
+        "Borrower Entity": "Borrower Entitity",
+        "Paid Through Date": "Paid through Date",
+    }
+    grouped = grouped.rename(columns=rename_map)
+
+    for col in output_cols:
+        if col not in grouped.columns:
+            grouped[col] = pd.NA
+
+    return grouped[output_cols]
 
 
 # ============================================================
 # Excel workbook writer
 # ============================================================
 
-def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
+
+def excel_col_name(col_idx):
+    """Convert zero-based column index to Excel letter."""
+    name = ""
+    col_idx += 1
+    while col_idx:
+        col_idx, remainder = divmod(col_idx - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def build_output_workbook(dq_table_internal, dq_loans_by_deal, report_title):
     output = BytesIO()
+    dq_table = dq_table_display_frame(dq_table_internal)
 
     with pd.ExcelWriter(output, engine="xlsxwriter", datetime_format="m/d/yyyy") as writer:
         workbook = writer.book
 
         # ----------------------------------------------------
-        # DQ Table sheet
+        # Formats
         # ----------------------------------------------------
-        dq_table.to_excel(writer, sheet_name="DQ Table", index=False)
-
-        ws = writer.sheets["DQ Table"]
-
         header_fmt = workbook.add_format({
             "bold": True,
             "bg_color": "#D9EAD3",
@@ -866,13 +1301,38 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
             "text_wrap": True,
             "valign": "top",
         })
-
         date_fmt = workbook.add_format({"num_format": "m/d/yyyy"})
         money_fmt = workbook.add_format({"num_format": "$#,##0.00"})
         wrap_fmt = workbook.add_format({"text_wrap": True, "valign": "top"})
 
+        # ----------------------------------------------------
+        # DQ Table sheet: blank first row, headers on row 2.
+        # ----------------------------------------------------
+        sheet_name = "DQ Table"
+        ws = workbook.add_worksheet(sheet_name)
+        writer.sheets[sheet_name] = ws
+
+        start_row = 1
         for col_num, col_name in enumerate(dq_table.columns):
-            ws.write(0, col_num, col_name, header_fmt)
+            ws.write(start_row, col_num, col_name, header_fmt)
+
+        for r_idx, (_, row) in enumerate(dq_table.iterrows(), start=start_row + 1):
+            for c_idx, col_name in enumerate(dq_table.columns):
+                value = safe_excel_value(row[col_name])
+
+                if col_name in ["Paid Through Date", "Appraisal Date"]:
+                    fmt = date_fmt
+                elif col_name in ["Current UPB", "Recent Appraisal"]:
+                    fmt = money_fmt
+                elif col_name == "Commentary":
+                    fmt = wrap_fmt
+                else:
+                    fmt = None
+
+                if value is None:
+                    ws.write_blank(r_idx, c_idx, None, fmt)
+                else:
+                    ws.write(r_idx, c_idx, value, fmt)
 
         widths = {
             "A": 18,
@@ -891,16 +1351,11 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
             "N": 16,
             "O": 70,
         }
-
         for col_letter, width in widths.items():
             ws.set_column(f"{col_letter}:{col_letter}", width)
 
-        ws.set_column("K:K", 16, date_fmt)
-        ws.set_column("L:M", 16, money_fmt)
-        ws.set_column("N:N", 16, date_fmt)
-        ws.set_column("O:O", 70, wrap_fmt)
-        ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, len(dq_table), len(dq_table.columns) - 1)
+        ws.freeze_panes(2, 0)
+        ws.autofilter(start_row, 0, start_row + len(dq_table), len(dq_table.columns) - 1)
 
         # ----------------------------------------------------
         # DQ Loans by Deal sheet
@@ -909,7 +1364,7 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
         ws2 = workbook.add_worksheet(sheet_name)
         writer.sheets[sheet_name] = ws2
 
-        display_grouped = dq_loans_by_deal.drop(columns=["row_type"]).copy()
+        display_grouped = dq_loans_by_deal.drop(columns=["row_type", "_sum_current_upb"]).copy()
         grouped_cols = display_grouped.columns.tolist()
 
         title_fmt = workbook.add_format({
@@ -917,7 +1372,6 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
             "font_size": 14,
             "align": "left",
         })
-
         header_fmt_2 = workbook.add_format({
             "bold": True,
             "bg_color": "#D9EAD3",
@@ -925,49 +1379,41 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
             "text_wrap": True,
             "valign": "top",
         })
-
         deal_fmt = workbook.add_format({
             "bold": True,
             "bg_color": "#C6E0B4",
             "border": 1,
         })
-
         status_fmt = workbook.add_format({
             "bold": True,
             "bg_color": "#E2F0D9",
             "border": 1,
         })
-
         total_fmt = workbook.add_format({
             "bold": True,
             "bg_color": "#FFF2CC",
             "border": 1,
         })
-
         total_money_fmt = workbook.add_format({
             "bold": True,
             "bg_color": "#FFF2CC",
             "border": 1,
             "num_format": "$#,##0.00",
         })
-
         loan_fmt = workbook.add_format({
             "border": 1,
             "valign": "top",
         })
-
         loan_date_fmt = workbook.add_format({
             "border": 1,
             "num_format": "m/d/yyyy",
             "valign": "top",
         })
-
         loan_money_fmt = workbook.add_format({
             "border": 1,
             "num_format": "$#,##0.00",
             "valign": "top",
         })
-
         loan_wrap_fmt = workbook.add_format({
             "border": 1,
             "text_wrap": True,
@@ -982,15 +1428,19 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
         for col_num, col_name in enumerate(grouped_cols, start=start_col):
             ws2.write(header_row, col_num, col_name, header_fmt_2)
 
-        col_positions = {
-            col_name: idx + start_col
-            for idx, col_name in enumerate(grouped_cols)
-        }
+        col_positions = {col_name: idx + start_col for idx, col_name in enumerate(grouped_cols)}
+        loan_id_col_idx = col_positions.get("Loan ID")
+
+        current_loan_start_row = None
+        current_loan_end_row = None
+        current_upb_col_idx = col_positions.get("Current UPB")
 
         for row_idx, (_, row) in enumerate(dq_loans_by_deal.iterrows(), start=header_row + 1):
             row_type = row["row_type"]
 
             if row_type == "deal":
+                current_loan_start_row = None
+                current_loan_end_row = None
                 label = row.get("Item", "")
                 ws2.merge_range(
                     row_idx,
@@ -1002,6 +1452,8 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
                 )
 
             elif row_type == "status":
+                current_loan_start_row = None
+                current_loan_end_row = None
                 label = row.get("Item", "")
                 ws2.merge_range(
                     row_idx,
@@ -1018,22 +1470,32 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
 
                     if col_name == "Item":
                         ws2.write(row_idx, col_idx, "TOTAL UPB", total_fmt)
-                    elif col_name == "Current UPB":
-                        ws2.write(
-                            row_idx,
-                            col_idx,
-                            safe_excel_value(row.get("Current UPB")),
-                            total_money_fmt,
-                        )
+                    elif col_name == "Loan ID":
+                        if current_loan_start_row is not None and current_loan_end_row is not None and current_upb_col_idx is not None:
+                            col_letter = excel_col_name(current_upb_col_idx)
+                            # XlsxWriter row indexes are zero-based; Excel formulas are one-based.
+                            start_excel_row = current_loan_start_row + 1
+                            end_excel_row = current_loan_end_row + 1
+                            formula = f"=SUM({col_letter}{start_excel_row}:{col_letter}{end_excel_row})"
+                            ws2.write_formula(row_idx, col_idx, formula, total_money_fmt)
+                        else:
+                            ws2.write_blank(row_idx, col_idx, None, total_money_fmt)
                     else:
                         ws2.write_blank(row_idx, col_idx, None, total_fmt)
 
+                current_loan_start_row = None
+                current_loan_end_row = None
+
             else:
+                if current_loan_start_row is None:
+                    current_loan_start_row = row_idx
+                current_loan_end_row = row_idx
+
                 for col_name in grouped_cols:
                     col_idx = col_positions[col_name]
                     value = row.get(col_name)
 
-                    if col_name in ["Paid Through Date", "Appraisal Date"]:
+                    if col_name in ["Paid through Date", "Appraisal Date"]:
                         fmt = loan_date_fmt
                     elif col_name in ["Current UPB", "Recent Appraisal"]:
                         fmt = loan_money_fmt
@@ -1043,7 +1505,6 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
                         fmt = loan_fmt
 
                     value = safe_excel_value(value)
-
                     if value is None:
                         ws2.write_blank(row_idx, col_idx, None, fmt)
                     else:
@@ -1076,10 +1537,95 @@ def build_output_workbook(dq_table, dq_loans_by_deal, report_title):
 
 
 # ============================================================
+# Validation helpers
+# ============================================================
+
+
+def validate_against_current_dashboard(dq_table_internal, current_dashboard_file):
+    if current_dashboard_file is None or not sheet_exists(current_dashboard_file, "DQ Table"):
+        return None, None
+
+    target = read_dq_table_from_dashboard(current_dashboard_file, ["DQ Table"])
+    if target.empty:
+        return None, None
+
+    generated = dq_table_display_frame(dq_table_internal).copy()
+    generated.columns = [clean_col_name(c) for c in generated.columns]
+    generated["loan_id"] = generated["loan_id"].apply(clean_id_value)
+
+    target["loan_id"] = target["loan_id"].apply(clean_id_value)
+
+    compare_rows = generated.merge(
+        target,
+        on="loan_id",
+        how="outer",
+        suffixes=("_generated", "_target"),
+        indicator=True,
+    )
+
+    cols_to_compare = [
+        "securitization",
+        "dq",
+        "deal_id",
+        "account",
+        "borrower_entity",
+        "deal_name",
+        "property_type",
+        "city",
+        "state",
+        "paid_through_date",
+        "current_upb",
+        "recent_appraisal",
+        "appraisal_date",
+        "commentary",
+    ]
+
+    def norm_compare_value(x):
+        if pd.isna(x):
+            return ""
+        if isinstance(x, pd.Timestamp):
+            return x.strftime("%Y-%m-%d")
+        if hasattr(x, "strftime") and not isinstance(x, str):
+            try:
+                return pd.Timestamp(x).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        s = str(x).strip()
+        if re.match(r"^\d+\.0$", s):
+            s = s.replace(".0", "")
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    mismatch_frames = []
+    matched = compare_rows[compare_rows["_merge"].eq("both")].copy()
+
+    for col in cols_to_compare:
+        gen_col = f"{col}_generated"
+        tgt_col = f"{col}_target"
+        if gen_col not in matched.columns or tgt_col not in matched.columns:
+            continue
+        left = matched[gen_col].apply(norm_compare_value)
+        right = matched[tgt_col].apply(norm_compare_value)
+        mask = left.ne(right)
+        temp = matched.loc[mask, ["loan_id"]].copy()
+        temp["field"] = col
+        temp["generated_value"] = matched.loc[mask, gen_col].values
+        temp["target_value"] = matched.loc[mask, tgt_col].values
+        mismatch_frames.append(temp)
+
+    if mismatch_frames:
+        mismatches = pd.concat(mismatch_frames, ignore_index=True)
+    else:
+        mismatches = pd.DataFrame(columns=["loan_id", "field", "generated_value", "target_value"])
+
+    return compare_rows, mismatches
+
+
+# ============================================================
 # Streamlit UI
 # ============================================================
 
-st.subheader("1. Upload DLSR / RSRV Excel files")
+st.subheader("1. Upload this month's RSRV / DLSR Excel files")
 
 dlsr_files = st.file_uploader(
     "Upload all RSRV Excel files that contain a 'Delinquent Loan Status', 'Delinquency Loan Status', or 'DLSR' sheet.",
@@ -1087,12 +1633,31 @@ dlsr_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
-st.subheader("2. Upload metadata source")
+st.subheader("2. Upload this month's dashboard workbook")
 
-metadata_file = st.file_uploader(
-    "Optional but recommended: upload the prior dashboard workbook with a 'DQ Table' sheet. This fills Account, Borrower Entity, Deal Name, City, and State.",
+current_dashboard_file = st.file_uploader(
+    "Required: upload this month's dashboard workbook. The app uses this workbook's Term Loan and Data sheets to enrich new loans.",
     type=["xls", "xlsx"],
     accept_multiple_files=False,
+    key="current_dashboard",
+)
+
+st.subheader("3. Upload last month's dashboard workbook")
+
+last_dashboard_file = st.file_uploader(
+    "Required: upload last month's dashboard workbook. The app uses its DQ Table / DQ Loans by Deal sheets as carry-forward metadata.",
+    type=["xls", "xlsx"],
+    accept_multiple_files=False,
+    key="last_dashboard",
+)
+
+use_manual_dq_overrides = st.checkbox(
+    "Use last month's DQ values as overrides when available",
+    value=False,
+    help=(
+        "Leave this unchecked if DLSR section rows are the source of truth. "
+        "Check only if you want prior/manual DQ values to override the current DLSR status."
+    ),
 )
 
 generate = st.button("Generate DQ Workbook", type="primary")
@@ -1100,6 +1665,14 @@ generate = st.button("Generate DQ Workbook", type="primary")
 if generate:
     if not dlsr_files:
         st.error("Please upload at least one DLSR / RSRV Excel file.")
+        st.stop()
+
+    if current_dashboard_file is None:
+        st.error("Please upload this month's dashboard workbook so the app can read the Term Loan and Data sheets.")
+        st.stop()
+
+    if last_dashboard_file is None:
+        st.error("Please upload last month's dashboard workbook so the app can carry forward prior DQ metadata.")
         st.stop()
 
     with st.spinner("Parsing DLSR files..."):
@@ -1114,36 +1687,33 @@ if generate:
 
     st.success(f"Generated DQ Data: {len(dq_data_generated):,} loan rows")
 
-    metadata_cache = None
+    with st.spinner("Reading current month Term Loan and Data enrichment..."):
+        current_enrichment = build_current_month_enrichment(current_dashboard_file)
 
-    if metadata_file is not None:
-        with st.spinner("Reading metadata cache from DQ Table..."):
-            try:
-                metadata_cache = read_dq_table_metadata(metadata_file, sheet_name="DQ Table")
-
-                if metadata_cache.empty:
-                    st.warning("Metadata workbook was uploaded, but no usable DQ Table rows were found.")
-                else:
-                    st.success(f"Loaded metadata cache: {len(metadata_cache):,} rows")
-
-            except Exception as e:
-                st.warning(f"Could not read metadata workbook. Continuing without enrichment. Error: {e}")
-                metadata_cache = None
+    if current_enrichment.empty:
+        st.warning("No current-month enrichment rows were found from Term Loan/Data.")
     else:
-        st.warning(
-            "No metadata workbook uploaded. The app will still generate outputs, but descriptive fields "
-            "like Account, Borrower Entity, cleaned Deal Name, City, and State may not match the existing manual DQ Table."
-        )
+        st.success(f"Loaded current-month enrichment rows: {len(current_enrichment):,}")
 
-    dq_table_generated = build_dq_table_from_dq_data(
+    with st.spinner("Reading last month carry-forward metadata..."):
+        last_carryforward = build_last_month_carryforward(last_dashboard_file)
+
+    if last_carryforward.empty:
+        st.warning("No last-month carry-forward rows were found from DQ Table / DQ Loans by Deal.")
+    else:
+        st.success(f"Loaded last-month carry-forward rows: {len(last_carryforward):,}")
+
+    dq_table_internal = build_dq_table_from_dq_data(
         dq_data=dq_data_generated,
-        metadata_cache=metadata_cache,
+        current_month_enrichment=current_enrichment,
+        last_month_carryforward=last_carryforward,
+        use_manual_dq_overrides=use_manual_dq_overrides,
     )
 
-    dq_loans_by_deal = build_dq_loans_by_deal(dq_table_generated)
+    dq_table_generated = dq_table_display_frame(dq_table_internal)
+    dq_loans_by_deal = build_dq_loans_by_deal(dq_table_internal)
 
     report_as_of = pd.NaT
-
     if (
         "report_as_of_date" in dq_data_generated.columns
         and dq_data_generated["report_as_of_date"].notna().any()
@@ -1165,32 +1735,57 @@ if generate:
 
     st.subheader("Generated DQ Loans by Deal")
     st.dataframe(
-        dq_loans_by_deal.drop(columns=["row_type"]),
+        dq_loans_by_deal.drop(columns=["row_type", "_sum_current_upb"]),
         width="stretch",
     )
 
     st.subheader("Summary by Securitization and DQ")
-
     summary = (
-        dq_table_generated
+        dq_table_internal
         .assign(
-            _deal_order=dq_table_generated["Securitization"].map(deal_order_value),
-            _dq_order=dq_table_generated["DQ"].map(dq_order_value),
+            _deal_order=dq_table_internal["_Securitization Key"].map(deal_order_value),
+            _dq_order=dq_table_internal["DQ"].map(lambda x: dq_order_value(x, DQ_REPORT_ORDER)),
         )
-        .groupby(["Securitization", "DQ", "_deal_order", "_dq_order"], dropna=False)
+        .groupby(["_Securitization Key", "DQ", "_deal_order", "_dq_order"], dropna=False)
         .agg(
             loan_count=("Loan id", "count"),
             current_upb=("Current UPB", "sum"),
         )
         .reset_index()
+        .rename(columns={"_Securitization Key": "Securitization"})
         .sort_values(["_deal_order", "_dq_order"])
         .drop(columns=["_deal_order", "_dq_order"])
     )
-
     st.dataframe(summary, width="stretch")
 
+    with st.expander("Optional validation against this month's dashboard DQ Table"):
+        compare_rows, field_mismatches = validate_against_current_dashboard(
+            dq_table_internal,
+            current_dashboard_file,
+        )
+
+        if compare_rows is None:
+            st.info("This month's dashboard does not have a readable DQ Table for validation.")
+        else:
+            st.write("Row match counts:")
+            st.dataframe(compare_rows["_merge"].value_counts().reset_index(), width="stretch")
+
+            st.write("Field mismatch summary:")
+            if field_mismatches.empty:
+                st.success("No field mismatches found against the current dashboard DQ Table.")
+            else:
+                mismatch_summary = (
+                    field_mismatches
+                    .groupby("field")
+                    .size()
+                    .reset_index(name="mismatch_count")
+                    .sort_values("mismatch_count", ascending=False)
+                )
+                st.dataframe(mismatch_summary, width="stretch")
+                st.dataframe(field_mismatches, width="stretch")
+
     output_workbook = build_output_workbook(
-        dq_table=dq_table_generated,
+        dq_table_internal=dq_table_internal,
         dq_loans_by_deal=dq_loans_by_deal,
         report_title=report_title,
     )

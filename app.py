@@ -5,25 +5,51 @@ import pandas as pd
 import streamlit as st
 
 
+APP_VERSION = "2026-05-15-v5-na-safe"
+
+
 # ============================================================
 # Page setup
 # ============================================================
 
 st.set_page_config(
     page_title="DQ Table Generator",
-    page_icon="📊",
+    page_icon="DQ",
     layout="wide",
 )
 
 st.title("DQ Table Generator")
 st.caption(
-    "Upload RSRV / DLSR Excel files to generate the DQ Table and DQ Loans by Deal sheets."
+    f"Version {APP_VERSION} | Upload RSRV / DLSR Excel files to generate the DQ Table and DQ Loans by Deal sheets."
 )
 
 
 # ============================================================
 # General helpers
 # ============================================================
+
+def excel_engine_for_file(file_name):
+    name = str(file_name).lower()
+    if name.endswith(".xls"):
+        return "xlrd"
+    if name.endswith(".xlsx"):
+        return "openpyxl"
+    return None
+
+
+def make_excel_file(file_bytes, file_name):
+    engine = excel_engine_for_file(file_name)
+    if engine is None:
+        return pd.ExcelFile(BytesIO(file_bytes))
+    return pd.ExcelFile(BytesIO(file_bytes), engine=engine)
+
+
+def read_excel_sheet(file_bytes, file_name, sheet_name, header=None):
+    engine = excel_engine_for_file(file_name)
+    if engine is None:
+        return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=header)
+    return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=header, engine=engine)
+
 
 def clean_col_name(col):
     col = str(col).strip()
@@ -61,7 +87,6 @@ def make_unique_columns(cols):
 def cell_to_text(x):
     if pd.isna(x):
         return ""
-
     return str(x).strip().lower()
 
 
@@ -115,14 +140,17 @@ def normalize_dq_status(x):
         "90+ DAYS DELINQUENT": "90+",
         "90 + DAYS DELINQUENT": "90+",
         "90 DAYS DELINQUENT": "90+",
+        "90 PLUS DAYS DELINQUENT": "90+",
 
         "60": "60-89",
         "60-89": "60-89",
+        "60 TO 89": "60-89",
         "60 TO 89 DAYS DELINQUENT": "60-89",
         "60 - 89 DAYS DELINQUENT": "60-89",
 
         "30": "30-59",
         "30-59": "30-59",
+        "30 TO 59": "30-59",
         "30 TO 59 DAYS DELINQUENT": "30-59",
         "30 - 59 DAYS DELINQUENT": "30-59",
 
@@ -166,7 +194,6 @@ def normalize_securitization(x):
 def col_or_na(df, col):
     if col in df.columns:
         return df[col]
-
     return pd.Series(pd.NA, index=df.index)
 
 
@@ -174,7 +201,6 @@ def first_existing_series(df, candidates):
     for col in candidates:
         if col in df.columns:
             return df[col]
-
     return pd.Series(pd.NA, index=df.index)
 
 
@@ -235,28 +261,24 @@ DQ_DISPLAY = {
 
 def deal_sort_key(x):
     x = str(x)
-
     if x in DEAL_ORDER:
         return (0, DEAL_ORDER.index(x))
-
     return (1, x)
 
 
 def deal_order_value(x):
     x = str(x)
-
     if x in DEAL_ORDER:
         return DEAL_ORDER.index(x)
-
     return 999
 
 
 def dq_order_value(x):
     x = normalize_dq_status(x)
-
+    if pd.isna(x):
+        return 999
     if x in DQ_ORDER:
         return DQ_ORDER.index(x)
-
     return 999
 
 
@@ -302,8 +324,8 @@ def securitization_from_file(source_file):
 # DLSR sheet detection
 # ============================================================
 
-def find_dlsr_sheet(file_bytes):
-    xl = pd.ExcelFile(BytesIO(file_bytes))
+def find_dlsr_sheet(file_bytes, file_name):
+    xl = make_excel_file(file_bytes, file_name)
     sheet_names = xl.sheet_names
 
     preferred = [
@@ -342,16 +364,17 @@ def extract_as_of_date(df_raw):
     for r in df_raw.index:
         for c in df_raw.columns:
             val = cell_to_text(df_raw.loc[r, c])
-
             if val == "as of":
                 if r + 1 in df_raw.index:
                     return parse_report_date(df_raw.loc[r + 1, c])
-
     return pd.NaT
 
 
 def classify_section_value(value):
     normalized = normalize_dq_status(value)
+
+    if pd.isna(normalized):
+        return None
 
     valid_sections = [
         "90+",
@@ -362,7 +385,7 @@ def classify_section_value(value):
         "Matured Non-Performing",
     ]
 
-    if normalized in valid_sections:
+    if str(normalized) in valid_sections:
         return normalized
 
     return None
@@ -376,7 +399,7 @@ def process_dlsr_uploaded_file(uploaded_file):
     source_file = uploaded_file.name
     file_bytes = uploaded_file.getvalue()
 
-    sheet_name = find_dlsr_sheet(file_bytes)
+    sheet_name = find_dlsr_sheet(file_bytes, source_file)
 
     if sheet_name is None:
         return None, {
@@ -385,8 +408,9 @@ def process_dlsr_uploaded_file(uploaded_file):
             "reason": "No DLSR-like sheet found",
         }
 
-    df_raw = pd.read_excel(
-        BytesIO(file_bytes),
+    df_raw = read_excel_sheet(
+        file_bytes=file_bytes,
+        file_name=source_file,
         sheet_name=sheet_name,
         header=None,
     )
@@ -420,7 +444,7 @@ def process_dlsr_uploaded_file(uploaded_file):
 
     loan_id_col = loan_id_cols[0]
 
-    # DQ is encoded as section rows in column 1, then forward-filled to loan rows.
+    # DQ is encoded as section rows in the first column, then forward-filled to loan rows.
     df["dq"] = pd.NA
 
     first_col = df.columns[0]
@@ -531,15 +555,17 @@ def find_dq_table_header_row(df_raw):
 
 
 def read_dq_table_metadata(uploaded_file, sheet_name="DQ Table"):
+    file_name = uploaded_file.name
     file_bytes = uploaded_file.getvalue()
 
-    xl = pd.ExcelFile(BytesIO(file_bytes))
+    xl = make_excel_file(file_bytes, file_name)
 
     if sheet_name not in xl.sheet_names:
         return pd.DataFrame()
 
-    dq_table_raw = pd.read_excel(
-        BytesIO(file_bytes),
+    dq_table_raw = read_excel_sheet(
+        file_bytes=file_bytes,
+        file_name=file_name,
         sheet_name=sheet_name,
         header=None,
     )
@@ -649,7 +675,7 @@ def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
     })
 
     # Optional enrichment using prior/manual DQ Table.
-    # DLSR does not reliably contain the cleaned account/borrower/deal/city/state metadata.
+    # DLSR does not reliably contain cleaned account/borrower/deal/city/state metadata.
     if metadata_cache is not None and not metadata_cache.empty:
         e = metadata_cache.copy()
         e["loan_id"] = e["loan_id"].apply(clean_id_value)

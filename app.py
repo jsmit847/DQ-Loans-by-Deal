@@ -119,11 +119,12 @@ def normalize_dq_status(x):
         "60": "60-89",
         "60-89": "60-89",
         "60 TO 89 DAYS DELINQUENT": "60-89",
-        "60 TO 89 DAYS DELINQUENT": "60-89",
+        "60 - 89 DAYS DELINQUENT": "60-89",
 
         "30": "30-59",
         "30-59": "30-59",
         "30 TO 59 DAYS DELINQUENT": "30-59",
+        "30 - 59 DAYS DELINQUENT": "30-59",
 
         "CURRENT AND AT SPECIAL SERVICER": "Current and at Special Servicer",
 
@@ -157,7 +158,6 @@ def normalize_securitization(x):
         "CAF 18-1": "CAF 2018-1",
         "CAF19-2": "CAF 2019-2",
         "CAF 19-2": "CAF 2019-2",
-        "CAF 2019-3": "CAF 2019-3",
     }
 
     return mapping.get(u, u)
@@ -191,7 +191,77 @@ def safe_excel_value(value):
 
 
 # ============================================================
-# Securitization helpers
+# Deal / DQ ordering
+# ============================================================
+
+DEAL_ORDER = [
+    "CAF 2017-2",
+    "CAF 2018-1",
+    "CAF 2018-2",
+    "CAF 2019-1",
+    "CAF 2019-2",
+    "CAF 2019-3",
+    "CAF 2020-1",
+    "CAF 2020-2",
+    "CAF 2020-3",
+    "CAF 2020-4",
+    "CAFL 2020-P1",
+    "CAF 2021-1",
+    "CAF 2021-2",
+    "CAF 2021-3",
+    "CAF 2022-1",
+    "CAF 2022-P2",
+    "CAF 2023-P1",
+]
+
+DQ_ORDER = [
+    "90+",
+    "60-89",
+    "30-59",
+    "Current and at Special Servicer",
+    "Matured Performing",
+    "Matured Non-Performing",
+]
+
+DQ_DISPLAY = {
+    "90+": "90+ Days Delinquent",
+    "60-89": "60-89 Days Delinquent",
+    "30-59": "30-59 Days Delinquent",
+    "Current and at Special Servicer": "Current and at Special Servicer",
+    "Matured Performing": "Matured Performing Loans",
+    "Matured Non-Performing": "Matured Non-Performing Loans",
+}
+
+
+def deal_sort_key(x):
+    x = str(x)
+
+    if x in DEAL_ORDER:
+        return (0, DEAL_ORDER.index(x))
+
+    return (1, x)
+
+
+def deal_order_value(x):
+    x = str(x)
+
+    if x in DEAL_ORDER:
+        return DEAL_ORDER.index(x)
+
+    return 999
+
+
+def dq_order_value(x):
+    x = normalize_dq_status(x)
+
+    if x in DQ_ORDER:
+        return DQ_ORDER.index(x)
+
+    return 999
+
+
+# ============================================================
+# Securitization helper
 # ============================================================
 
 def securitization_from_file(source_file):
@@ -226,64 +296,6 @@ def securitization_from_file(source_file):
     }
 
     return mapping.get(code, pd.NA)
-
-
-DEAL_ORDER = [
-    "CAF 2017-2",
-    "CAF 2018-1",
-    "CAF 2018-2",
-    "CAF 2019-1",
-    "CAF 2019-2",
-    "CAF 2019-3",
-    "CAF 2020-1",
-    "CAF 2020-2",
-    "CAF 2020-3",
-    "CAF 2020-4",
-    "CAFL 2020-P1",
-    "CAF 2021-1",
-    "CAF 2021-2",
-    "CAF 2021-3",
-    "CAF 2022-1",
-    "CAF 2022-P2",
-    "CAF 2023-P1",
-]
-
-
-def deal_sort_key(x):
-    x = str(x)
-
-    if x in DEAL_ORDER:
-        return (0, DEAL_ORDER.index(x))
-
-    return (1, x)
-
-
-DQ_ORDER = [
-    "90+",
-    "60-89",
-    "30-59",
-    "Current and at Special Servicer",
-    "Matured Performing",
-    "Matured Non-Performing",
-]
-
-DQ_DISPLAY = {
-    "90+": "90+ Days Delinquent",
-    "60-89": "60-89 Days Delinquent",
-    "30-59": "30-59 Days Delinquent",
-    "Current and at Special Servicer": "Current and at Special Servicer",
-    "Matured Performing": "Matured Performing Loans",
-    "Matured Non-Performing": "Matured Non-Performing Loans",
-}
-
-
-def dq_sort_key(x):
-    x = normalize_dq_status(x)
-
-    if x in DQ_ORDER:
-        return DQ_ORDER.index(x)
-
-    return 999
 
 
 # ============================================================
@@ -380,7 +392,6 @@ def process_dlsr_uploaded_file(uploaded_file):
     )
 
     report_as_of = extract_as_of_date(df_raw)
-
     header_row = find_header_row(df_raw)
 
     if header_row is None:
@@ -409,7 +420,7 @@ def process_dlsr_uploaded_file(uploaded_file):
 
     loan_id_col = loan_id_cols[0]
 
-    # DQ status is stored as a section row, not as a column.
+    # DQ is encoded as section rows in column 1, then forward-filled to loan rows.
     df["dq"] = pd.NA
 
     first_col = df.columns[0]
@@ -440,6 +451,13 @@ def process_dlsr_uploaded_file(uploaded_file):
         df["securitization"] = sec_from_file
 
     df["securitization"] = df["securitization"].apply(normalize_securitization)
+
+    if "loan_id" not in df.columns:
+        return None, {
+            "file": source_file,
+            "status": "Skipped",
+            "reason": "Loan ID column missing after column cleanup",
+        }
 
     df["loan_id"] = df["loan_id"].apply(clean_id_value)
 
@@ -630,8 +648,8 @@ def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
         "Commentary": commentary,
     })
 
-    # Optional enrichment using a prior/manual DQ Table.
-    # These fields are descriptive metadata and are not reliably present in DLSR files.
+    # Optional enrichment using prior/manual DQ Table.
+    # DLSR does not reliably contain the cleaned account/borrower/deal/city/state metadata.
     if metadata_cache is not None and not metadata_cache.empty:
         e = metadata_cache.copy()
         e["loan_id"] = e["loan_id"].apply(clean_id_value)
@@ -670,14 +688,17 @@ def build_dq_table_from_dq_data(dq_data, metadata_cache=None):
         keep="first",
     ).copy()
 
-    out["_deal_order"] = out["Securitization"].map(lambda x: deal_sort_key(x))
-    out["_dq_order"] = out["DQ"].map(lambda x: dq_sort_key(x))
+    out["_deal_order"] = out["Securitization"].map(deal_order_value)
+    out["_dq_order"] = out["DQ"].map(dq_order_value)
     out["_loan_sort"] = out["Loan id"].astype(str)
 
-    out = out.sort_values(
-        by=["_deal_order", "_dq_order", "_loan_sort"],
-        ascending=True,
-    ).drop(columns=["_deal_order", "_dq_order", "_loan_sort"])
+    out = (
+        out.sort_values(
+            by=["_deal_order", "_dq_order", "_loan_sort"],
+            ascending=True,
+        )
+        .drop(columns=["_deal_order", "_dq_order", "_loan_sort"])
+    )
 
     final_cols = [
         "Securitization",
@@ -1059,7 +1080,7 @@ if generate:
         dq_data_generated, parse_log = parse_uploaded_dlsr_files(dlsr_files)
 
     st.subheader("File parsing results")
-    st.dataframe(parse_log, use_container_width=True)
+    st.dataframe(parse_log, width="stretch")
 
     if dq_data_generated.empty:
         st.error("No DQ loan rows were generated. Please check that the uploaded files contain DLSR sheets.")
@@ -1114,12 +1135,12 @@ if generate:
         output_name = "dq_output.xlsx"
 
     st.subheader("Generated DQ Table")
-    st.dataframe(dq_table_generated, use_container_width=True)
+    st.dataframe(dq_table_generated, width="stretch")
 
     st.subheader("Generated DQ Loans by Deal")
     st.dataframe(
         dq_loans_by_deal.drop(columns=["row_type"]),
-        use_container_width=True,
+        width="stretch",
     )
 
     st.subheader("Summary by Securitization and DQ")
@@ -1127,8 +1148,8 @@ if generate:
     summary = (
         dq_table_generated
         .assign(
-            _deal_order=dq_table_generated["Securitization"].map(deal_sort_key),
-            _dq_order=dq_table_generated["DQ"].map(dq_sort_key),
+            _deal_order=dq_table_generated["Securitization"].map(deal_order_value),
+            _dq_order=dq_table_generated["DQ"].map(dq_order_value),
         )
         .groupby(["Securitization", "DQ", "_deal_order", "_dq_order"], dropna=False)
         .agg(
@@ -1140,7 +1161,7 @@ if generate:
         .drop(columns=["_deal_order", "_dq_order"])
     )
 
-    st.dataframe(summary, use_container_width=True)
+    st.dataframe(summary, width="stretch")
 
     output_workbook = build_output_workbook(
         dq_table=dq_table_generated,

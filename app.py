@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 
-APP_VERSION = "2026-05-15-v12-current-situs-termloan-carryforward"
+APP_VERSION = "2026-05-15-v13-situs-rowwise-termloan-fill"
 
 
 # ============================================================
@@ -84,6 +84,50 @@ def is_blank_like(x):
         return True
 
     return False
+
+
+def clean_metadata_value(x):
+    """Clean descriptive metadata values. Treat 0/blank-like values as missing.
+
+    This is intentionally not used for Situs property fields because Situs may
+    legitimately say Various. It is used for Term Loan / carry-forward identity
+    fields such as Account, Borrower Entity, and Deal Name.
+    """
+    if pd.isna(x):
+        return pd.NA
+
+    s = str(x).strip()
+
+    if s == "":
+        return pd.NA
+
+    if s.upper() in {"N/A", "NA", "NAN", "NONE", "NULL", "<NA>"}:
+        return pd.NA
+
+    if s in {"0", "0.0"}:
+        return pd.NA
+
+    return x
+
+
+def coalesce_columns(df, candidates):
+    """Row-wise coalesce across multiple possible source columns.
+
+    Unlike first_existing_series(), this checks each row. That matters when
+    Situs has a column but only covers some loans; the remaining rows must fall
+    back to DLSR or carry-forward values.
+    """
+    out = pd.Series(pd.NA, index=df.index)
+
+    for col in candidates:
+        if col not in df.columns:
+            continue
+
+        source = df[col]
+        mask = out.apply(is_blank_like)
+        out.loc[mask] = source.loc[mask]
+
+    return out
 
 
 def clean_id_value(x):
@@ -183,6 +227,7 @@ def normalize_securitization(x):
         "CAF19-2": "CAF 2019-2",
         "CAF 19-2": "CAF 2019-2",
         "CAF 2020 P1": "CAFL 2020-P1",
+        "CAF 2020-P1": "CAFL 2020-P1",
         "CAF 2022 P2": "CAF 2022-P2",
         "CAF 2023 P1": "CAF 2023-P1",
     }
@@ -695,12 +740,12 @@ def read_current_term_loan_metadata(uploaded_file):
 
     out = pd.DataFrame({
         "loan_id": df["loan_id"],
-        "term_deal_id": col_or_na(df, "deal_number").apply(clean_id_value),
-        "term_account": col_or_na(df, "account_name"),
-        "term_borrower_entity": col_or_na(df, "borrower_entity"),
-        "term_deal_name": col_or_na(df, "deal_name"),
-        "term_portfolio": col_or_na(df, "portfolio"),
-        "term_segment": col_or_na(df, "segment"),
+        "term_deal_id": col_or_na(df, "deal_number").apply(clean_id_value).apply(clean_metadata_value),
+        "term_account": col_or_na(df, "account_name").apply(clean_metadata_value),
+        "term_borrower_entity": col_or_na(df, "borrower_entity").apply(clean_metadata_value),
+        "term_deal_name": col_or_na(df, "deal_name").apply(clean_metadata_value),
+        "term_portfolio": col_or_na(df, "portfolio").apply(clean_metadata_value),
+        "term_segment": col_or_na(df, "segment").apply(clean_metadata_value),
     })
 
     out = out.drop_duplicates(subset=["loan_id"], keep="first")
@@ -1004,7 +1049,7 @@ def build_dq_table_from_dq_data(
 
     # Situs is the preferred source for these current-month report fields.
     # DLSR remains the fallback because the DQ loan population/status comes from DLSR.
-    current_upb = first_existing_series(
+    current_upb = coalesce_columns(
         d,
         [
             "situs_current_upb",
@@ -1016,7 +1061,7 @@ def build_dq_table_from_dq_data(
         ],
     )
 
-    recent_appraisal = first_existing_series(
+    recent_appraisal = coalesce_columns(
         d,
         [
             "situs_recent_appraisal",
@@ -1028,7 +1073,7 @@ def build_dq_table_from_dq_data(
         ],
     )
 
-    appraisal_date = first_existing_series(
+    appraisal_date = coalesce_columns(
         d,
         [
             "situs_appraisal_date",
@@ -1040,7 +1085,7 @@ def build_dq_table_from_dq_data(
         ],
     )
 
-    paid_through = first_existing_series(
+    paid_through = coalesce_columns(
         d,
         [
             "situs_paid_through_date",
@@ -1050,7 +1095,7 @@ def build_dq_table_from_dq_data(
         ],
     )
 
-    commentary = first_existing_series(
+    commentary = coalesce_columns(
         d,
         [
             "situs_commentary",
@@ -1103,6 +1148,8 @@ def build_dq_table_from_dq_data(
             mapped = out["Loan id"].map(e[source_col])
             if transform is not None:
                 mapped = mapped.apply(transform)
+            elif target_col in ["Account", "Borrower Entity", "Deal Name"]:
+                mapped = mapped.apply(clean_metadata_value)
             out[target_col] = mapped.combine_first(out[target_col])
 
         # DQ Loans by Deal often carries appraisal fields more completely than DLSR.
@@ -1140,11 +1187,20 @@ def build_dq_table_from_dq_data(
         for source_col, target_col in term_map.items():
             if source_col not in e.columns:
                 continue
-            mapped = out["Loan id"].map(e[source_col])
+
+            mapped = out["Loan id"].map(e[source_col]).apply(clean_metadata_value)
+
             if target_col == "Deal ID":
+                # Term Loan Deal Number should replace DLSR Prospectus Loan ID
+                # when available. Carry-forward and Term Loan should generally agree;
+                # for new loans, this is the only source of dashboard Deal ID.
                 mapped = mapped.apply(clean_id_value)
-            # Term Loan is authoritative for these metadata fields when present.
-            out[target_col] = mapped.combine_first(out[target_col])
+                out[target_col] = mapped.combine_first(out[target_col])
+            else:
+                # For identity/name fields, keep carry-forward values for existing
+                # loans to preserve known dashboard spellings/casing/manual curation.
+                # Term Loan fills only new/blank rows.
+                out[target_col] = coalesce_existing(out[target_col], mapped)
 
         situs_map = {
             "situs_property_type": "Property Type",

@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "2026-05-15-v15c-dlsr-staging-no-dqdata-source"
+APP_VERSION = "2026-05-15-v16-dqdata-report-appraisal-overrides"
 
 # ============================================================
 # Streamlit setup
@@ -20,8 +20,8 @@ st.set_page_config(
 st.title("DQ Table Generator")
 st.caption(f"Version {APP_VERSION}")
 st.caption(
-    "Creates DQ Table and DQ Loans by Deal from uploaded RSRV/DLSR files. "
-    "The workbook DQ Data sheet is not used as a source; the app creates its own DLSR staging dataset."
+    "Creates DQ Data, DQ Table, and DQ Loans by Deal from uploaded RSRV/DLSR files. "
+    "The workbook DQ Data sheet is not used as a source; the app creates its own DQ Data tab."
 )
 
 # ============================================================
@@ -94,7 +94,7 @@ DQ_DISPLAY = {
 DQ_TABLE_DEAL_ORDER = [
     "CAF 2017-2",
     "CAF 2018-1",
-    "CAF2018-2",
+    "CAF 2018-2",
     "CAF 2019-1",
     "CAF 2019-2",
     "CAF 2019-3",
@@ -311,8 +311,9 @@ def normalize_property_type(x):
         return "Various"
     if u in ["MULTIFAMILY", "MULTI FAMILY"]:
         return "MF"
-    if u in ["SFRS", "SFR", "SINGLE FAMILY", "SINGLE FAMILY RENTAL", "SINGLE FAMILY RENTALS"]:
-        # Preserve SFR when it comes from carry-forward; DLSR generally uses SF.
+    if u in ["SFR", "SFRS"]:
+        return "SFR"
+    if u in ["SINGLE FAMILY", "SINGLE FAMILY RENTAL", "SINGLE FAMILY RENTALS"]:
         return "SF"
     return s
 
@@ -338,6 +339,32 @@ def clean_state(x):
     if u in ["ZZ", "XX", "INCOMPLETE"]:
         return pd.NA
     return STATE_ABBREV.get(u, s)
+
+
+def is_placeholder_text(x) -> bool:
+    if is_blankish(x):
+        return True
+    return str(x).strip().upper() in ["VARIOUS", "INCOMPLETE", "ZZ", "XX"]
+
+
+def choose_new_loan_location(dlsr_city, dlsr_state, inferred_city, inferred_state):
+    city = dlsr_city
+    state = dlsr_state
+
+    if is_placeholder_text(city) and not is_placeholder_text(inferred_city):
+        city = inferred_city
+    if is_placeholder_text(state) and not is_placeholder_text(inferred_state):
+        state = inferred_state
+
+    city = clean_city(city)
+    state = clean_state(state)
+
+    if is_blankish(city):
+        city = "Various"
+    if is_blankish(state):
+        state = "Various"
+
+    return city, state
 
 
 def safe_excel_value(value):
@@ -374,6 +401,11 @@ def extract_city_state_from_commentary(commentary) -> Tuple[object, object]:
     if re.search(r"\blocated in\s+[A-Z]{2}\s+and\s+\d+\s+located in\s+[A-Z]{2}\b", text):
         return "Various", "Various"
 
+    # Common phrasing with state only: "properties located in NC".
+    m = re.search(r"located in\s+([A-Z]{2})\b", text)
+    if m:
+        return "Various", m.group(1).strip()
+
     return pd.NA, pd.NA
 
 # ============================================================
@@ -390,7 +422,7 @@ def securitization_from_file(source_file):
     mapping = {
         "20172": "CAF 2017-2",
         "20181": "CAF 2018-1",
-        "20182": "CAF2018-2",
+        "20182": "CAF 2018-2",
         "20191": "CAF 2019-1",
         "20192": "CAF 2019-2",
         "20193": "CAF 2019-3",
@@ -437,9 +469,8 @@ def normalize_sec_for_table(x, source_file=None):
     if u in explicit:
         return explicit[u]
 
-    # Preserve historical no-space display for CAF2018-2 in DQ Table.
     if u in ["CAF2018-2", "CAF 2018-2"]:
-        return "CAF2018-2" if "CAF2018-2" in s.upper().replace(" ", "") else "CAF 2018-2"
+        return "CAF 2018-2"
 
     m = re.match(r"CAF(\d{4})-(\d+)$", u)
     if m:
@@ -698,6 +729,62 @@ def read_current_term_loan(uploaded_file):
     df = df.drop_duplicates(subset=["loan_id"], keep="first")
     return df
 
+def read_prior_dq_loans_by_deal(uploaded_file):
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    file_bytes = uploaded_file.getvalue()
+    xl = pd.ExcelFile(BytesIO(file_bytes))
+
+    sheet_name = None
+    for candidate in ["DQ Loans by Deal", "OLD DQ Loans by Deal", "Old DQ Loans by Deal"]:
+        if candidate in xl.sheet_names:
+            sheet_name = candidate
+            break
+
+    if sheet_name is None:
+        return pd.DataFrame()
+
+    raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
+    header_row = find_header_row_by_required(raw, ["loan", "deal id", "account"])
+    if header_row is None:
+        return pd.DataFrame()
+
+    df = raw.iloc[header_row + 1:].copy()
+    df.columns = make_unique_columns(raw.iloc[header_row])
+    df = df.dropna(how="all").copy()
+
+    # DQ Loans by Deal is a grouped report. Keep actual loan rows only.
+    if "loan_id" not in df.columns:
+        return pd.DataFrame()
+
+    df = df[df["loan_id"].notna()].copy()
+    df = df[df["loan_id"].astype(str).str.contains(r"\d", na=False)].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["loan_id"] = df["loan_id"].apply(clean_id_value)
+
+    # Normalize common typo from the report header.
+    if "borrower_entitity" in df.columns and "borrower_entity" not in df.columns:
+        df = df.rename(columns={"borrower_entitity": "borrower_entity"})
+
+    for col in ["recent_appraisal", "appraisal_date", "current_upb"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    df["recent_appraisal"] = pd.to_numeric(df["recent_appraisal"], errors="coerce")
+    df["appraisal_date"] = df["appraisal_date"].apply(parse_report_date)
+    df["current_upb"] = pd.to_numeric(df["current_upb"], errors="coerce")
+
+    keep = [c for c in [
+        "loan_id", "recent_appraisal", "appraisal_date", "current_upb",
+        "account", "borrower_entity", "deal_name", "property_type", "city", "state"
+    ] if c in df.columns]
+
+    return df[keep].drop_duplicates(subset=["loan_id"], keep="first")
+
+
 # ============================================================
 # DQ Table builder
 # ============================================================
@@ -719,11 +806,12 @@ def get_from_lookup(lookup, loan_id, col):
     return pd.NA
 
 
-def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_loan=None, use_prior_dq_override=False):
+def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_loan=None, use_prior_dq_override=False, dq_overrides=None):
     d = dlsr_staging.copy()
     d["loan_id"] = d["loan_id"].apply(clean_id_value)
     prior_lookup = as_lookup(prior_dq_table)
     term_lookup = as_lookup(current_term_loan)
+    override_lookup = as_lookup(dq_overrides)
 
     rows = []
     for _, row in d.iterrows():
@@ -741,6 +829,8 @@ def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_
         dq = normalize_dq_status(row.get("dq"))
         if use_prior_dq_override and is_existing and not is_blankish(prior.get("dq")):
             dq = normalize_dq_status(prior.get("dq"))
+        if loan_id in override_lookup and not is_blankish(override_lookup[loan_id].get("dq")):
+            dq = normalize_dq_status(override_lookup[loan_id].get("dq"))
 
         dlsr_property_type = normalize_property_type(row.get("property_type"))
         dlsr_city = clean_city(row.get("property_city"))
@@ -763,8 +853,7 @@ def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_
             borrower_entity = first_present(term.get("borrower_entity"), pd.NA)
             deal_name = first_present(term.get("deal_name"), row.get("property_name"))
             property_type = first_present(dlsr_property_type, "Various")
-            city = first_present(dlsr_city, inferred_city, "Various")
-            state = first_present(dlsr_state, inferred_state, "Various")
+            city, state = choose_new_loan_location(dlsr_city, dlsr_state, inferred_city, inferred_state)
 
         # Current values come from the generated DLSR staging dataset.
         paid_through = parse_report_date(row.get("paid_through_date"))
@@ -807,13 +896,15 @@ def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_
 # DQ Loans by Deal builder
 # ============================================================
 
-def build_dq_loans_by_deal(dq_table, include_empty_2017_2=True):
+def build_dq_loans_by_deal(dq_table, prior_dq_loans_by_deal=None, include_empty_2017_2=True):
     d = dq_table.copy()
     if d.empty:
         return pd.DataFrame(columns=["row_type"] + DQ_REPORT_COLUMNS)
     d["Report Securitization"] = d["Securitization"].apply(sec_table_to_report)
     d["DQ"] = d["DQ"].apply(normalize_dq_status)
     d["Current UPB"] = pd.to_numeric(d["Current UPB"], errors="coerce")
+
+    prior_report_lookup = as_lookup(prior_dq_loans_by_deal)
 
     rows = []
     deals_with_rows = set(d["Report Securitization"].dropna().astype(str).unique())
@@ -835,8 +926,13 @@ def build_dq_loans_by_deal(dq_table, include_empty_2017_2=True):
             status_df = status_df.sort_values("_loan_sort")
 
             rows.append({"row_type": "status", "Item": DQ_DISPLAY.get(dq_status, dq_status)})
-            start_loan_excel_row = len(rows) + 4  # after headers/title in Excel writer
+            # Excel rows are 1-based. Data begins at Excel row 5 because title/header rows occupy rows 1-4.
+            start_loan_excel_row = len(rows) + 5
             for _, loan in status_df.iterrows():
+                loan_id = clean_id_value(loan.get("Loan id"))
+                prior_report = prior_report_lookup.get(loan_id, {})
+                recent_appraisal = first_present(loan.get("Recent Appraisal"), prior_report.get("recent_appraisal"))
+                appraisal_date = first_present(loan.get("Appraisal Date"), prior_report.get("appraisal_date"))
                 rows.append({
                     "row_type": "loan",
                     "Item": pd.NA,
@@ -850,11 +946,11 @@ def build_dq_loans_by_deal(dq_table, include_empty_2017_2=True):
                     "State": loan.get("State"),
                     "Paid through Date": loan.get("Paid Through Date"),
                     "Current UPB": loan.get("Current UPB"),
-                    "Recent Appraisal": loan.get("Recent Appraisal"),
-                    "Appraisal Date": loan.get("Appraisal Date"),
+                    "Recent Appraisal": recent_appraisal,
+                    "Appraisal Date": appraisal_date,
                     "Commentary": loan.get("Commentary"),
                 })
-            end_loan_excel_row = len(rows) + 3
+            end_loan_excel_row = len(rows) + 4
             total_upb = status_df["Current UPB"].sum()
             rows.append({
                 "row_type": "total",
@@ -865,7 +961,7 @@ def build_dq_loans_by_deal(dq_table, include_empty_2017_2=True):
             })
 
         if deal_df.empty and include_empty_2017_2 and deal == "CAF 2017-2":
-            rows.append({"row_type": "total", "Item": "TOTAL UPB", "Loan ID": 0, "_sum_start": None, "_sum_end": None})
+            rows.append({"row_type": "total", "Item": "TOTAL UPB", "Loan ID": pd.NA, "_sum_start": None, "_sum_end": None})
 
     report = pd.DataFrame(rows)
     for col in DQ_REPORT_COLUMNS:
@@ -877,7 +973,7 @@ def build_dq_loans_by_deal(dq_table, include_empty_2017_2=True):
 # Excel writer
 # ============================================================
 
-def write_output_workbook(dq_table, dq_report, report_title):
+def write_output_workbook(dq_table, dq_report, report_title, dq_data_generated=None):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter", datetime_format="m/d/yyyy") as writer:
         workbook = writer.book
@@ -900,6 +996,33 @@ def write_output_workbook(dq_table, dq_report, report_title):
         ws.set_column(14, 14, 75, wrap_fmt)
         ws.freeze_panes(2, 0)
         ws.autofilter(1, 0, len(dq_table) + 1, len(DQ_TABLE_COLUMNS) - 1)
+
+        # Generated DQ Data staging sheet. This replaces the manually-created DQ Data tab.
+        if dq_data_generated is not None and not dq_data_generated.empty:
+            dq_data_out = dq_data_generated.copy()
+            preferred_cols = [
+                "securitization", "dq", "loan_id", "prospectus_loan_id", "trans_id",
+                "property_name", "property_type", "property_city", "property_state",
+                "paid_through_date", "current_ending_scheduled_balance",
+                "most_recent_value", "most_recent_valuation_date", "comments_dlsr",
+                "source_file", "source_sheet", "source_header_row", "report_as_of_date"
+            ]
+            ordered_cols = [c for c in preferred_cols if c in dq_data_out.columns] + [
+                c for c in dq_data_out.columns if c not in preferred_cols
+            ]
+            dq_data_out = dq_data_out[ordered_cols]
+            dq_data_out.to_excel(writer, sheet_name="DQ Data", index=False)
+            ws_data = writer.sheets["DQ Data"]
+            for c, name in enumerate(dq_data_out.columns):
+                ws_data.write(0, c, name, header_fmt)
+                width = 18
+                if name in ["comments_dlsr", "property_name"]:
+                    width = 60
+                elif name in ["source_file", "source_sheet"]:
+                    width = 26
+                ws_data.set_column(c, c, width)
+            ws_data.freeze_panes(1, 0)
+            ws_data.autofilter(0, 0, len(dq_data_out), max(len(dq_data_out.columns) - 1, 0))
 
         # DQ Loans by Deal
         sheet = "DQ Loans by Deal"
@@ -938,13 +1061,20 @@ def write_output_workbook(dq_table, dq_report, report_title):
                     elif name == "Loan ID":
                         sum_start = row.get("_sum_start")
                         sum_end = row.get("_sum_end")
-                        value = safe_excel_value(row.get("Loan ID")) or 0
+                        value = safe_excel_value(row.get("Loan ID"))
                         if pd.notna(sum_start) and pd.notna(sum_end) and sum_end >= sum_start:
-                            # Current UPB is column L in this layout.
-                            formula = f"=SUM(L{int(sum_start)}:L{int(sum_end)})"
-                            ws2.write_formula(excel_row, col, formula, total_money_fmt, value)
+                            # Current UPB is column L in this layout. Match the manual report's single-cell SUM style when possible.
+                            if int(sum_start) == int(sum_end):
+                                formula = f"=SUM(L{int(sum_start)})"
+                            else:
+                                formula = f"=SUM(L{int(sum_start)}:L{int(sum_end)})"
+                            cached_value = value if value is not None else 0
+                            ws2.write_formula(excel_row, col, formula, total_money_fmt, cached_value)
                         else:
-                            ws2.write(excel_row, col, value, total_money_fmt)
+                            if value is None:
+                                ws2.write_blank(excel_row, col, None, total_money_fmt)
+                            else:
+                                ws2.write(excel_row, col, value, total_money_fmt)
                     else:
                         ws2.write_blank(excel_row, col, None, total_fmt)
             else:
@@ -1005,6 +1135,25 @@ use_prior_dq_override = st.checkbox(
     help="Leave unchecked if DQ should always come from current DLSR section headers. Check only for manual carry-forward exceptions.",
 )
 
+st.subheader("4. Manual override checks")
+
+default_dq_overrides = pd.DataFrame([
+    {"loan_id": "732059243", "dq": "90+", "reason": "Known April manual DQ Table override"},
+])
+
+use_manual_overrides = st.checkbox(
+    "Apply manual DQ overrides below",
+    value=True,
+    help="Use this for known workbook/manual exceptions. Delete rows or uncheck this box for pure DLSR-derived DQ statuses.",
+)
+
+dq_override_editor = st.data_editor(
+    default_dq_overrides,
+    num_rows="dynamic",
+    width="stretch",
+    disabled=["reason"],
+)
+
 show_debug = st.checkbox("Show debug staging data", value=False)
 
 generate = st.button("Generate DQ Workbook", type="primary")
@@ -1033,6 +1182,7 @@ if generate:
     with st.spinner("Reading current Term Loan and prior DQ Table metadata..."):
         current_term_loan = read_current_term_loan(current_dashboard_file)
         prior_dq_table = read_prior_dq_table(prior_dashboard_file)
+        prior_dq_loans_by_deal = read_prior_dq_loans_by_deal(prior_dashboard_file)
 
     if current_term_loan.empty:
         st.warning("No usable Term Loan rows were found in this month's dashboard. New-loan identity fields may be incomplete.")
@@ -1044,18 +1194,34 @@ if generate:
     else:
         st.success(f"Loaded prior DQ Table metadata: {len(prior_dq_table):,} rows")
 
+    if prior_dq_loans_by_deal.empty:
+        st.warning("No usable prior DQ Loans by Deal rows were found. Report appraisal carry-forward may be incomplete.")
+    else:
+        st.success(f"Loaded prior DQ Loans by Deal metadata: {len(prior_dq_loans_by_deal):,} rows")
+
+    dq_overrides = pd.DataFrame()
+    if use_manual_overrides and dq_override_editor is not None and not dq_override_editor.empty:
+        dq_overrides = dq_override_editor.copy()
+        if "loan_id" in dq_overrides.columns and "dq" in dq_overrides.columns:
+            dq_overrides["loan_id"] = dq_overrides["loan_id"].apply(clean_id_value)
+            dq_overrides["dq"] = dq_overrides["dq"].apply(normalize_dq_status)
+            dq_overrides = dq_overrides[dq_overrides["loan_id"].notna() & dq_overrides["dq"].notna()].copy()
+        else:
+            dq_overrides = pd.DataFrame()
+
     dq_table = build_dq_table_from_staging(
         dlsr_staging=dlsr_staging,
         prior_dq_table=prior_dq_table,
         current_term_loan=current_term_loan,
         use_prior_dq_override=use_prior_dq_override,
+        dq_overrides=dq_overrides,
     )
 
     if dq_table.empty:
         st.error("DQ Table generation produced no rows.")
         st.stop()
 
-    dq_report = build_dq_loans_by_deal(dq_table)
+    dq_report = build_dq_loans_by_deal(dq_table, prior_dq_loans_by_deal=prior_dq_loans_by_deal)
 
     report_as_of = pd.NaT
     if "report_as_of_date" in dlsr_staging.columns and dlsr_staging["report_as_of_date"].notna().any():
@@ -1095,8 +1261,12 @@ if generate:
         st.dataframe(current_term_loan, width="stretch")
         st.subheader("Debug: prior DQ Table metadata")
         st.dataframe(prior_dq_table, width="stretch")
+        st.subheader("Debug: prior DQ Loans by Deal metadata")
+        st.dataframe(prior_dq_loans_by_deal, width="stretch")
+        st.subheader("Debug: applied DQ overrides")
+        st.dataframe(dq_overrides, width="stretch")
 
-    workbook_bytes = write_output_workbook(dq_table, dq_report, report_title)
+    workbook_bytes = write_output_workbook(dq_table, dq_report, report_title, dq_data_generated=dlsr_staging)
     st.download_button(
         label="Download DQ Workbook",
         data=workbook_bytes,

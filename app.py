@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 
-APP_VERSION = "2026-05-15-v13-situs-rowwise-termloan-fill"
+APP_VERSION = "2026-05-15-v14-source-priority-mode"
 
 
 # ============================================================
@@ -287,14 +287,10 @@ def normalize_property_type(x):
     return s
 
 def dq_table_securitization_display(sec):
-    sec = normalize_securitization(sec)
-
-    # Match the existing dashboard quirk exactly.
-    special = {
-        "CAF 2018-2": "CAF2018-2",
-    }
-
-    return special.get(sec, sec)
+    # Current dashboard output uses normalized display names such as
+    # "CAF 2018-2" and "CAFL 2020-P1". Keep this centralized so any
+    # future display quirks can be handled in one place.
+    return normalize_securitization(sec)
 
 
 def report_securitization_display(sec):
@@ -1006,6 +1002,7 @@ def build_dq_table_from_dq_data(
     current_month_enrichment=None,
     last_month_carryforward=None,
     use_manual_dq_overrides=False,
+    source_mode="match_existing",
 ):
     d = dq_data.copy()
 
@@ -1047,63 +1044,129 @@ def build_dq_table_from_dq_data(
     if "data_securitization" in d.columns:
         d["securitization_final"] = coalesce_existing(d["securitization_final"], d["data_securitization"])
 
-    # Situs is the preferred source for these current-month report fields.
-    # DLSR remains the fallback because the DQ loan population/status comes from DLSR.
-    current_upb = coalesce_columns(
-        d,
-        [
-            "situs_current_upb",
-            "current_ending_scheduled_balance",
-            "current_upb",
-            "data_current_upb",
-            "scheduled_balance",
-            "ending_scheduled_balance",
-        ],
-    )
+    # Source priority depends on the purpose of the run.
+    #
+    # match_existing:
+    #   Designed to replicate the existing dashboard output. DLSR/DQ Data and
+    #   carry-forward/manual values win; Situs fills only blanks/new rows. This
+    #   avoids overwriting curated values such as "Various", blank appraisal
+    #   dates, and dashboard commentary.
+    #
+    # situs_authoritative:
+    #   Designed for a future-state process where this month's Situs sheet is
+    #   the authoritative source for property/reporting fields.
+    if source_mode == "situs_authoritative":
+        current_upb = coalesce_columns(
+            d,
+            [
+                "situs_current_upb",
+                "current_ending_scheduled_balance",
+                "current_upb",
+                "data_current_upb",
+                "scheduled_balance",
+                "ending_scheduled_balance",
+            ],
+        )
 
-    recent_appraisal = coalesce_columns(
-        d,
-        [
-            "situs_recent_appraisal",
-            "most_recent_value",
-            "recent_appraisal",
-            "group_recent_appraisal",
-            "data_recent_appraisal",
-            "most_recent_appraisal",
-        ],
-    )
+        recent_appraisal = coalesce_columns(
+            d,
+            [
+                "situs_recent_appraisal",
+                "most_recent_value",
+                "recent_appraisal",
+                "group_recent_appraisal",
+                "data_recent_appraisal",
+                "most_recent_appraisal",
+            ],
+        )
 
-    appraisal_date = coalesce_columns(
-        d,
-        [
-            "situs_appraisal_date",
-            "most_recent_valuation_date",
-            "appraisal_date",
-            "group_appraisal_date",
-            "data_appraisal_date",
-            "most_recent_appraisal_date",
-        ],
-    )
+        appraisal_date = coalesce_columns(
+            d,
+            [
+                "situs_appraisal_date",
+                "most_recent_valuation_date",
+                "appraisal_date",
+                "group_appraisal_date",
+                "data_appraisal_date",
+                "most_recent_appraisal_date",
+            ],
+        )
 
-    paid_through = coalesce_columns(
-        d,
-        [
-            "situs_paid_through_date",
-            "paid_through_date",
-            "paid_through_date_carry",
-            "data_paid_through_date",
-        ],
-    )
+        paid_through = coalesce_columns(
+            d,
+            [
+                "situs_paid_through_date",
+                "paid_through_date",
+                "paid_through_date_carry",
+                "data_paid_through_date",
+            ],
+        )
 
-    commentary = coalesce_columns(
-        d,
-        [
-            "situs_commentary",
-            "comments_dlsr",
-            "commentary",
-            "comments",
-        ],
-    )
+        commentary = coalesce_columns(
+            d,
+            [
+                "situs_commentary",
+                "comments_dlsr",
+                "commentary",
+                "comments",
+            ],
+        )
+    else:
+        current_upb = coalesce_columns(
+            d,
+            [
+                "current_ending_scheduled_balance",
+                "current_upb",
+                "scheduled_balance",
+                "ending_scheduled_balance",
+                "situs_current_upb",
+                "data_current_upb",
+            ],
+        )
+
+        recent_appraisal = coalesce_columns(
+            d,
+            [
+                "most_recent_value",
+                "recent_appraisal",
+                "group_recent_appraisal",
+                "most_recent_appraisal",
+                "situs_recent_appraisal",
+                "data_recent_appraisal",
+            ],
+        )
+
+        appraisal_date = coalesce_columns(
+            d,
+            [
+                "most_recent_valuation_date",
+                "appraisal_date",
+                "group_appraisal_date",
+                "most_recent_appraisal_date",
+                "situs_appraisal_date",
+                "data_appraisal_date",
+            ],
+        )
+
+        paid_through = coalesce_columns(
+            d,
+            [
+                "paid_through_date",
+                "paid_through_date_carry",
+                "situs_paid_through_date",
+                "data_paid_through_date",
+            ],
+        )
+
+        commentary = coalesce_columns(
+            d,
+            [
+                "comments_dlsr",
+                "commentary",
+                "comments",
+                "situs_commentary",
+            ],
+        )
 
     out = pd.DataFrame({
         "Securitization": d["securitization_final"].apply(dq_table_securitization_display),
@@ -1225,8 +1288,14 @@ def build_dq_table_from_dq_data(
                 mapped = mapped.apply(normalize_property_type)
             if target_col == "State":
                 mapped = mapped.apply(normalize_state)
-            # Situs is authoritative for these current-month reporting fields when present.
-            out[target_col] = mapped.combine_first(out[target_col])
+            if source_mode == "situs_authoritative":
+                # Future-state mode: Situs wins when populated.
+                out[target_col] = mapped.combine_first(out[target_col])
+            else:
+                # Replica mode: keep DLSR/carry-forward/manual values, including
+                # intentional "Various"/blank-style dashboard values; use Situs only
+                # when the generated value is genuinely blank.
+                out[target_col] = coalesce_existing(out[target_col], mapped)
 
         data_fallback_map = {
             "data_property_type": "Property Type",
@@ -1822,6 +1891,26 @@ use_manual_dq_overrides = st.checkbox(
     ),
 )
 
+source_mode_label = st.radio(
+    "DQ Table field source priority",
+    options=[
+        "Match existing dashboard DQ Table",
+        "Use current Situs as source of truth",
+    ],
+    index=0,
+    help=(
+        "Use 'Match existing' when validating against the current manual dashboard. "
+        "Use 'Situs' when you want this month's Situs sheet to overwrite property, "
+        "balance, valuation, and commentary fields."
+    ),
+)
+
+source_mode = (
+    "situs_authoritative"
+    if source_mode_label == "Use current Situs as source of truth"
+    else "match_existing"
+)
+
 generate = st.button("Generate DQ Workbook", type="primary")
 
 if generate:
@@ -1870,6 +1959,7 @@ if generate:
         current_month_enrichment=current_enrichment,
         last_month_carryforward=last_carryforward,
         use_manual_dq_overrides=use_manual_dq_overrides,
+        source_mode=source_mode,
     )
 
     dq_table_generated = dq_table_display_frame(dq_table_internal)

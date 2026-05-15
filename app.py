@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "2026-05-15-v16-dqdata-report-appraisal-overrides"
+APP_VERSION = "2026-05-15-v17-no-manual-overrides-clean-dqdata"
 
 # ============================================================
 # Streamlit setup
@@ -21,7 +21,7 @@ st.title("DQ Table Generator")
 st.caption(f"Version {APP_VERSION}")
 st.caption(
     "Creates DQ Data, DQ Table, and DQ Loans by Deal from uploaded RSRV/DLSR files. "
-    "The workbook DQ Data sheet is not used as a source; the app creates its own DQ Data tab."
+    "The workbook DQ Data sheet is not used as a source; the app creates a clean DQ Data tab without internal source/audit columns."
 )
 
 # ============================================================
@@ -806,12 +806,11 @@ def get_from_lookup(lookup, loan_id, col):
     return pd.NA
 
 
-def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_loan=None, use_prior_dq_override=False, dq_overrides=None):
+def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_loan=None):
     d = dlsr_staging.copy()
     d["loan_id"] = d["loan_id"].apply(clean_id_value)
     prior_lookup = as_lookup(prior_dq_table)
     term_lookup = as_lookup(current_term_loan)
-    override_lookup = as_lookup(dq_overrides)
 
     rows = []
     for _, row in d.iterrows():
@@ -826,11 +825,8 @@ def build_dq_table_from_staging(dlsr_staging, prior_dq_table=None, current_term_
         securitization = row.get("securitization")
         securitization = normalize_sec_for_table(securitization, row.get("source_file"))
 
+        # DQ always comes from the current DLSR section rows.
         dq = normalize_dq_status(row.get("dq"))
-        if use_prior_dq_override and is_existing and not is_blankish(prior.get("dq")):
-            dq = normalize_dq_status(prior.get("dq"))
-        if loan_id in override_lookup and not is_blankish(override_lookup[loan_id].get("dq")):
-            dq = normalize_dq_status(override_lookup[loan_id].get("dq"))
 
         dlsr_property_type = normalize_property_type(row.get("property_type"))
         dlsr_city = clean_city(row.get("property_city"))
@@ -1000,12 +996,18 @@ def write_output_workbook(dq_table, dq_report, report_title, dq_data_generated=N
         # Generated DQ Data staging sheet. This replaces the manually-created DQ Data tab.
         if dq_data_generated is not None and not dq_data_generated.empty:
             dq_data_out = dq_data_generated.copy()
+            internal_cols = [
+                "source_file",
+                "source_sheet",
+                "source_header_row",
+                "report_as_of_date",
+            ]
+            dq_data_out = dq_data_out.drop(columns=internal_cols, errors="ignore")
             preferred_cols = [
                 "securitization", "dq", "loan_id", "prospectus_loan_id", "trans_id",
                 "property_name", "property_type", "property_city", "property_state",
                 "paid_through_date", "current_ending_scheduled_balance",
                 "most_recent_value", "most_recent_valuation_date", "comments_dlsr",
-                "source_file", "source_sheet", "source_header_row", "report_as_of_date"
             ]
             ordered_cols = [c for c in preferred_cols if c in dq_data_out.columns] + [
                 c for c in dq_data_out.columns if c not in preferred_cols
@@ -1018,8 +1020,6 @@ def write_output_workbook(dq_table, dq_report, report_title, dq_data_generated=N
                 width = 18
                 if name in ["comments_dlsr", "property_name"]:
                     width = 60
-                elif name in ["source_file", "source_sheet"]:
-                    width = 26
                 ws_data.set_column(c, c, width)
             ws_data.freeze_panes(1, 0)
             ws_data.autofilter(0, 0, len(dq_data_out), max(len(dq_data_out.columns) - 1, 0))
@@ -1129,30 +1129,7 @@ prior_dashboard_file = st.file_uploader(
     key="prior_dashboard",
 )
 
-use_prior_dq_override = st.checkbox(
-    "Use last month's DQ status as an override for existing loans",
-    value=False,
-    help="Leave unchecked if DQ should always come from current DLSR section headers. Check only for manual carry-forward exceptions.",
-)
-
-st.subheader("4. Manual override checks")
-
-default_dq_overrides = pd.DataFrame([
-    {"loan_id": "732059243", "dq": "90+", "reason": "Known April manual DQ Table override"},
-])
-
-use_manual_overrides = st.checkbox(
-    "Apply manual DQ overrides below",
-    value=True,
-    help="Use this for known workbook/manual exceptions. Delete rows or uncheck this box for pure DLSR-derived DQ statuses.",
-)
-
-dq_override_editor = st.data_editor(
-    default_dq_overrides,
-    num_rows="dynamic",
-    width="stretch",
-    disabled=["reason"],
-)
+st.subheader("4. Options")
 
 show_debug = st.checkbox("Show debug staging data", value=False)
 
@@ -1199,22 +1176,10 @@ if generate:
     else:
         st.success(f"Loaded prior DQ Loans by Deal metadata: {len(prior_dq_loans_by_deal):,} rows")
 
-    dq_overrides = pd.DataFrame()
-    if use_manual_overrides and dq_override_editor is not None and not dq_override_editor.empty:
-        dq_overrides = dq_override_editor.copy()
-        if "loan_id" in dq_overrides.columns and "dq" in dq_overrides.columns:
-            dq_overrides["loan_id"] = dq_overrides["loan_id"].apply(clean_id_value)
-            dq_overrides["dq"] = dq_overrides["dq"].apply(normalize_dq_status)
-            dq_overrides = dq_overrides[dq_overrides["loan_id"].notna() & dq_overrides["dq"].notna()].copy()
-        else:
-            dq_overrides = pd.DataFrame()
-
     dq_table = build_dq_table_from_staging(
         dlsr_staging=dlsr_staging,
         prior_dq_table=prior_dq_table,
         current_term_loan=current_term_loan,
-        use_prior_dq_override=use_prior_dq_override,
-        dq_overrides=dq_overrides,
     )
 
     if dq_table.empty:
@@ -1263,8 +1228,6 @@ if generate:
         st.dataframe(prior_dq_table, width="stretch")
         st.subheader("Debug: prior DQ Loans by Deal metadata")
         st.dataframe(prior_dq_loans_by_deal, width="stretch")
-        st.subheader("Debug: applied DQ overrides")
-        st.dataframe(dq_overrides, width="stretch")
 
     workbook_bytes = write_output_workbook(dq_table, dq_report, report_title, dq_data_generated=dlsr_staging)
     st.download_button(
